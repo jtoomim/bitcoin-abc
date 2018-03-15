@@ -2684,7 +2684,7 @@ bool CWallet::SelectCoins(const std::vector<COutput> &vAvailableCoins,
                           const Amount nTargetValue,
                           std::set<CInputCoin> &setCoinsRet, Amount &nValueRet,
                           const CCoinControl &coin_control,
-                          const CoinSelectionParams &coin_selection_params,
+                          CoinSelectionParams &coin_selection_params,
                           bool &bnb_used) const {
     std::vector<COutput> vCoins(vAvailableCoins);
 
@@ -2717,6 +2717,7 @@ bool CWallet::SelectCoins(const std::vector<COutput> &vAvailableCoins,
         // For now, don't use BnB if preset inputs are selected. TODO: Enable
         // this later
         bnb_used = false;
+        coin_selection_params.use_bnb = false;
 
         std::map<TxId, CWalletTx>::const_iterator it =
             mapWallet.find(outpoint.GetTxId());
