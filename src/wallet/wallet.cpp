@@ -2611,7 +2611,8 @@ bool CWallet::OutputEligibleForSpending(
     }
 
     if (!g_mempool.TransactionWithinChainLimit(
-            output.tx->GetId(), eligibility_filter.max_ancestors)) {
+            output.tx->GetId(), eligibility_filter.max_ancestors,
+            eligibility_filter.max_descendants)) {
         return false;
     }
 
