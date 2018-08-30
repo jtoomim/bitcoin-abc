@@ -477,7 +477,8 @@ uint64_t GetSigOpCountWithoutP2SH(const CTransaction &tx, uint32_t flags);
  */
 uint64_t GetP2SHSigOpCount(const CTransaction &tx,
                            const CCoinsViewCache &mapInputs, uint32_t flags);
-
+uint64_t GetP2SHSigOpCount(const CTransaction &tx, const std::vector<Coin> &coins,
+                           uint32_t flags);
 /**
  * Compute total signature operation of a transaction.
  * @param[in] tx     Transaction for which we are computing the cost
@@ -507,6 +508,13 @@ bool CheckInputs(const CTransaction &tx, CValidationState &state,
                  const uint32_t flags, bool sigCacheStore,
                  bool scriptCacheStore,
                  const PrecomputedTransactionData &txdata,
+                 std::vector<CScriptCheck> *pvChecks = nullptr);
+bool CheckInputs(const CTransaction &tx, CValidationState &state,
+                 const std::vector<Coin> &coins, bool fScriptChecks,
+                 const uint32_t flags, bool sigCacheStore,
+                 bool scriptCacheStore,
+                 const PrecomputedTransactionData &txdata,
+                 uint32_t nHeight,
                  std::vector<CScriptCheck> *pvChecks = nullptr);
 
 /**
@@ -542,6 +550,8 @@ namespace Consensus {
  */
 bool CheckTxInputs(const CTransaction &tx, CValidationState &state,
                    const CCoinsViewCache &inputs, int nSpendHeight);
+bool CheckTxInputs(const CTransaction &tx, CValidationState &state,
+                   const std::vector<Coin> coins, int nSpendHeight);
 
 } // namespace Consensus
 

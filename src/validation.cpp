@@ -11,6 +11,7 @@
 #include "chainparams.h"
 #include "checkpoints.h"
 #include "checkqueue.h"
+#include "coins.h"
 #include "config.h"
 #include "consensus/consensus.h"
 #include "consensus/merkle.h"
@@ -50,6 +51,10 @@
 #include <boost/math/distributions/poisson.hpp>
 #include <boost/range/adaptor/reversed.hpp>
 #include <boost/thread.hpp>
+
+#ifdef _OPENMP
+#include <omp.h>
+#endif
 
 #if defined(NDEBUG)
 #error "Bitcoin cannot be compiled without assertions."
@@ -395,15 +400,24 @@ uint64_t GetSigOpCountWithoutP2SH(const CTransaction &tx, uint32_t flags) {
 
 uint64_t GetP2SHSigOpCount(const CTransaction &tx, const CCoinsViewCache &view,
                            uint32_t flags) {
+    std::vector<Coin> coins;
+    coins.resize(tx.vin.size());
+    for (size_t j=0; j < tx.vin.size(); j++) {
+        coins[j] = view.AccessCoin(tx.vin[j].prevout);
+    }
+    return GetP2SHSigOpCount(tx, coins, flags);
+}
+uint64_t GetP2SHSigOpCount(const CTransaction &tx, const std::vector<Coin> &coins,
+                           uint32_t flags) {
     if ((flags & SCRIPT_VERIFY_P2SH) == 0 || tx.IsCoinBase()) {
         return 0;
     }
 
     uint64_t nSigOps = 0;
-    for (auto &i : tx.vin) {
-        const CTxOut &prevout = view.GetOutputFor(i);
+    for (size_t i=0; i < tx.vin.size(); i++) {
+        const CTxOut &prevout = coins[i].GetTxOut();
         if (prevout.scriptPubKey.IsPayToScriptHash()) {
-            nSigOps += prevout.scriptPubKey.GetSigOpCount(flags, i.scriptSig);
+            nSigOps += prevout.scriptPubKey.GetSigOpCount(flags, tx.vin[i].scriptSig);
         }
     }
 
@@ -414,6 +428,11 @@ uint64_t GetTransactionSigOpCount(const CTransaction &tx,
                                   const CCoinsViewCache &view, uint32_t flags) {
     return GetSigOpCountWithoutP2SH(tx, flags) +
            GetP2SHSigOpCount(tx, view, flags);
+}
+uint64_t GetTransactionSigOpCount(const CTransaction &tx,
+                                  const std::vector<Coin> &coins, uint32_t flags) {
+    return GetSigOpCountWithoutP2SH(tx, flags) +
+           GetP2SHSigOpCount(tx, coins, flags);
 }
 
 static bool CheckTransactionCommon(const CTransaction &tx,
@@ -1491,12 +1510,21 @@ bool CheckTxInputs(const CTransaction &tx, CValidationState &state,
     if (!inputs.HaveInputs(tx)) {
         return state.Invalid(false, 0, "", "Inputs unavailable");
     }
+    std::vector<Coin> coins;
+    coins.resize(tx.vin.size());
+    for (size_t j=0; j < tx.vin.size(); j++) {
+        coins[j] = inputs.AccessCoin(tx.vin[j].prevout);
+    }
+    return CheckTxInputs(tx, state, coins, nSpendHeight);
+}
 
+bool CheckTxInputs(const CTransaction &tx, CValidationState &state,
+                   const std::vector<Coin> coins, int nSpendHeight) {
     Amount nValueIn(0);
     Amount nFees(0);
-    for (const auto &in : tx.vin) {
-        const COutPoint &prevout = in.prevout;
-        const Coin &coin = inputs.AccessCoin(prevout);
+    for (size_t i=0; i < tx.vin.size(); i++) {
+        const COutPoint &prevout = tx.vin[i].prevout;
+        const Coin &coin = coins[i];
         assert(!coin.IsSpent());
 
         // If prev is coinbase, check that it's matured
@@ -1546,9 +1574,25 @@ bool CheckInputs(const CTransaction &tx, CValidationState &state,
                  bool scriptCacheStore,
                  const PrecomputedTransactionData &txdata,
                  std::vector<CScriptCheck> *pvChecks) {
+    std::vector<Coin> coins;
+    coins.resize(tx.vin.size());
+    for (size_t j=0; j < tx.vin.size(); j++) {
+        coins[j] = inputs.AccessCoin(tx.vin[j].prevout);
+    }
+    return CheckInputs(tx, state, coins, fScriptChecks, flags,
+                sigCacheStore, scriptCacheStore, txdata,
+                GetSpendHeight(inputs), pvChecks);
+}
+bool CheckInputs(const CTransaction &tx, CValidationState &state,
+                 const std::vector<Coin> &coins, bool fScriptChecks,
+                 const uint32_t flags, bool sigCacheStore,
+                 bool scriptCacheStore,
+                 const PrecomputedTransactionData &txdata,
+                 uint32_t nHeight,
+                 std::vector<CScriptCheck> *pvChecks) {
     assert(!tx.IsCoinBase());
 
-    if (!Consensus::CheckTxInputs(tx, state, inputs, GetSpendHeight(inputs))) {
+    if (!Consensus::CheckTxInputs(tx, state, coins, nHeight)) {
         return false;
     }
 
@@ -1580,7 +1624,7 @@ bool CheckInputs(const CTransaction &tx, CValidationState &state,
 
     for (size_t i = 0; i < tx.vin.size(); i++) {
         const COutPoint &prevout = tx.vin[i].prevout;
-        const Coin &coin = inputs.AccessCoin(prevout);
+        const Coin &coin = coins[i];
         assert(!coin.IsSpent());
 
         // We very carefully only pass in things to CScriptCheck which are
@@ -2127,106 +2171,214 @@ static bool ConnectBlock(const Config &config, const CBlock &block,
     vPos.reserve(block.vtx.size());
     blockundo.vtxundo.reserve(block.vtx.size() - 1);
 
-    std::unordered_map<uint256, uint32_t, SaltedTxidHasher> txpositions;
-    uint32_t curposition = 0;
-    for (const auto &ptx : block.vtx) {
-        const CTransaction &tx = *ptx;
 
-        nInputs += tx.vin.size();
+    // Next comes the bulk of the transaction validation code.
 
-        vPos.push_back(std::make_pair(tx.GetId(), pos));
-        pos.nTxOffset += ::GetSerializeSize(tx, SER_DISK, CLIENT_VERSION);
+    // First, we handle the coinbase tx, since it's special.
 
-        if (tx.IsCoinBase()) {
-            // We've already checked for sigops count before P2SH in CheckBlock.
-            nSigOpsCount += GetSigOpCountWithoutP2SH(tx, flags);
+    // Second, we make a note of the byte address for each transaction
+    // in the block. (Mostly non-parallelizable step)
+    // This step is separate only for the parallel version of the code.
+    // Otherwise, we just lump it in with the next step.
+
+    // Third, we process all of the outputs and insert them into our
+    // UTXO cache, and record a txid:tx_position map. This loop
+    // is fully parallelizable, although locks currently limit its
+    // performance.
+
+    // Fourth, we loop through all of the inputs, check their UTXOs and spend
+    // them from our cache, verify fees, amounts, sigops, and scripts,
+    // and ensure that all spends come later in the block(chain) than their
+    // outputs.
+
+    // 1. This step is only required for the coinbase tx. Moving it outside
+    // the loop allows us to save an if statement inside it
+    {
+        const CTransaction &tx = *block.vtx[0];
+        if (!tx.IsCoinBase()) {
+            throw std::logic_error("Transaction 0 is not coinbase");
         }
+        nInputs += tx.vin.size();
+        // We've already checked for sigops count before P2SH in CheckBlock.
+        nSigOpsCount += GetSigOpCountWithoutP2SH(tx, flags);
 
         try {
             AddCoins(view, tx, pindex->nHeight);
         } catch (std::logic_error& e) {
-            // This happens if we try to insert outputs from the same transaction
-            // twice (i.e. pre-BIP30 coinbases).
-            return state.DoS(100, error("ConnectBlock(): inputs missing/spent"),
-                             REJECT_INVALID, "bad-txns-inputs-missingorspent");
+            // This happens if we try to insert outputs from the same
+            // transaction twice (i.e. pre-BIP30 coinbases).
+            // OpenMP does not allow us to use break or returns inside a
+            // parallel for block, but finishing the inserts into a cache
+            // overlay won't do any harm
+            return state.DoS(100, error("ConnectBlock(): coinbase BIP30 violation"),
+                REJECT_INVALID, "bad-txns-BIP30");
+        }
+    } // end of coinbase special processing
+
+    //  2. Unparallizable steps, if we're in parallel mode
+    #ifdef _OPENMP
+    for (uint32_t i=1; i<block.vtx.size(); i++) {
+        const CTransaction &tx = *block.vtx[i];
+
+        vPos.push_back(std::make_pair(tx.GetId(), pos));
+        pos.nTxOffset += ::GetSerializeSize(tx, SER_DISK, CLIENT_VERSION);
+    }
+    #endif
+
+    // 3. Parallelizeable steps for inserting outputs into UTXO set
+    std::unordered_map<uint256, uint32_t, SaltedTxidHasher> txpositions;
+    bool doubletxid = false;
+    #pragma omp parallel for shared(nInputs, nSigOpsCount)
+    for (uint32_t i=1; i<block.vtx.size(); i++) {
+        const CTransaction &tx = *block.vtx[i];
+
+        #ifndef _OPENMP
+        // Unparallelizable steps, if we're not in parallel mode
+        vPos.push_back(std::make_pair(tx.GetId(), pos));
+        pos.nTxOffset += ::GetSerializeSize(tx, SER_DISK, CLIENT_VERSION);
+        #endif
+
+        nInputs += tx.vin.size();
+        #pragma omp critical(view)
+        try {
+            AddCoins(view, tx, pindex->nHeight);
+        } catch (std::logic_error& e) {
+            // This can happen if there are two transactions with
+            // the same txid (e.g. coinbase)
+            doubletxid = true;
         }
 
         if (!fIsMagneticAnomalyEnabled) {
-            txpositions[tx.GetId()] = curposition++;
+            #pragma omp critical(txpositions)
+            txpositions[tx.GetId()] = i;
         }
     }
+    if (doubletxid) {
+        return state.DoS(100, error("ConnectBlock(): non-coinbase BIP30 violation"),
+                REJECT_INVALID, "bad-txns-BIP30");
+    } // 3. End of output insertions
 
-    curposition = -1;
-    for (const auto &ptx : block.vtx) {
-        curposition++;
-        const CTransaction &tx = *ptx;
-        if (tx.IsCoinBase()) {
-            continue;
-        }
+    // OpenMP has issues reducing (summing) the Amount class between
+    // threads, so we will do that manually
+    std::vector<Amount> vFees;
+    #ifdef _OPENMP
+    vFees.resize(omp_get_max_threads());
+    #else
+    vFees.resize(1);
+    #endif
+    for (int j=0; j<vFees.size(); j++) {
+        vFees[j] = Amount(0);
+    }
 
-        if (!view.HaveInputs(tx)) {
-            return state.DoS(100, error("ConnectBlock(): inputs missing/spent"),
-                             REJECT_INVALID, "bad-txns-inputs-missingorspent");
-        }
+    std::vector<Coin> coins;
+    int err = 0;
 
-        // Check that transaction is BIP68 final BIP68 lock checks (as
-        // opposed to nLockTime checks) must be in ConnectBlock because they
-        // require the UTXO set.
-        prevheights.resize(tx.vin.size());
-        for (size_t j = 0; j < tx.vin.size(); j++) {
-            prevheights[j] = view.AccessCoin(tx.vin[j].prevout).GetHeight();
-        }
+    // 4. Check inputs, fees, sigops, scripts, positions
+    #pragma omp parallel for private(prevheights, coins) shared(err)
+    for (size_t i=1; i<block.vtx.size(); i++) {
+        if (!err) {
+            const CTransaction &tx = *block.vtx[i];
+            bool result;
 
-        if (!SequenceLocks(tx, nLockTimeFlags, &prevheights, *pindex)) {
-            return state.DoS(
-                100,
-                error("%s: contains a non-BIP68-final transaction", __func__),
-                REJECT_INVALID, "bad-txns-nonfinal");
-        }
+            #pragma omp critical(blockundo)
+            blockundo.vtxundo.push_back(CTxUndo());
 
-        // GetTransactionSigOpCount counts 2 types of sigops:
-        // * legacy (always)
-        // * p2sh (when P2SH enabled in flags and excludes coinbase)
-        auto txSigOpsCount = GetTransactionSigOpCount(tx, view, flags);
-        if (txSigOpsCount > MAX_TX_SIGOPS_COUNT) {
-            return state.DoS(100, false, REJECT_INVALID, "bad-txn-sigops");
-        }
+            coins.resize(tx.vin.size());
+            prevheights.resize(tx.vin.size());
+            #pragma omp critical(view)
+            {
+                result = !view.HaveInputs(tx);
+                if (!result) {
+                    for (size_t j=0; j < tx.vin.size(); j++) {
+                        coins[j] = view.AccessCoin(tx.vin[j].prevout);
+                    }
+                    SpendCoins(view, tx, blockundo.vtxundo.back(), pindex->nHeight);
+                }
+            }
+            if (result) {
+                // return is not allowed inside an omp parallel block
+                err = 1;
+                continue;
+            }
 
-        nSigOpsCount += txSigOpsCount;
-        if (nSigOpsCount > nMaxSigOpsCount) {
-            return state.DoS(100, error("ConnectBlock(): too many sigops"),
-                             REJECT_INVALID, "bad-blk-sigops");
-        }
+            // Check that transaction is BIP68--final BIP68 lock checks (as
+            // opposed to nLockTime checks) must be in ConnectBlock because they
+            // require the UTXO set.
+            prevheights.resize(tx.vin.size());
+            for (size_t j=0; j < tx.vin.size(); j++) {
+                prevheights[j] = coins[j].GetHeight();
+            }
+            if (!SequenceLocks(tx, nLockTimeFlags, &prevheights, *pindex)) {
+                err = 2;
+                continue;
+            }
 
-        Amount fee = view.GetValueIn(tx) - tx.GetValueOut();
-        nFees += fee;
+            // GetTransactionSigOpCount counts 2 types of sigops:
+            // * legacy (always)
+            // * p2sh (when P2SH enabled in flags and excludes coinbase)
+            uint64_t txSigOpsCount;
+            txSigOpsCount = GetTransactionSigOpCount(tx, coins, flags);
+            if (txSigOpsCount > MAX_TX_SIGOPS_COUNT) {
+                err = 3;
+                continue;
+            }
 
-        // Don't cache results if we're actually connecting blocks (still
-        // consult the cache, though).
-        bool fCacheResults = fJustCheck;
+            #pragma omp atomic
+            nSigOpsCount += txSigOpsCount;
+            if (nSigOpsCount > nMaxSigOpsCount) {
+                err = 4;
+                continue;
+            }
 
-        std::vector<CScriptCheck> vChecks;
-        if (!CheckInputs(tx, state, view, fScriptChecks, flags, fCacheResults,
-                         fCacheResults, PrecomputedTransactionData(tx),
-                         &vChecks)) {
-            return error("ConnectBlock(): CheckInputs on %s failed with %s",
-                         tx.GetId().ToString(), FormatStateMessage(state));
-        }
+            Amount fee;
+            for (size_t j=0; j < tx.vin.size(); j++) {
+                fee += coins[j].GetTxOut().nValue;
+            }
+            fee -= tx.GetValueOut();
+            #ifdef _OPENMP
+            vFees[omp_get_thread_num()] += fee;
+            #else
+            vFees[0] += fee;
+            #endif
 
-        control.Add(vChecks);
+            // Don't cache results if we're actually connecting blocks (still
+            // consult the cache, though).
+            bool fCacheResults = fJustCheck;
 
-        blockundo.vtxundo.push_back(CTxUndo());
-        SpendCoins(view, tx, blockundo.vtxundo.back(), pindex->nHeight);
+            std::vector<CScriptCheck> vChecks;
+            result = !CheckInputs(tx, state, coins, fScriptChecks, flags, fCacheResults,
+                             fCacheResults, PrecomputedTransactionData(tx),
+                             pindex->nHeight, &vChecks);
+            if (result) {
+                err = 5;
+                continue;
+            }
 
-        if (!fIsMagneticAnomalyEnabled) {
-            for (size_t j = 0; j < tx.vin.size(); j++) {
-                if (txpositions.count(tx.vin[j].prevout.GetTxId()) &&
-                    txpositions[tx.vin[j].prevout.GetTxId()] >= curposition) {
-                    return state.DoS(100, error("ConnectBlock(): inputs missing/spent"),
-                             REJECT_INVALID, "bad-txns-inputs-missingorspent");
+            #pragma omp critical(control)
+            control.Add(vChecks);
+
+            if (!fIsMagneticAnomalyEnabled) {
+                for (size_t j = 0; j < tx.vin.size(); j++) {
+                    if (txpositions.count(tx.vin[j].prevout.GetTxId()) &&
+                        txpositions[tx.vin[j].prevout.GetTxId()] >= i) {
+                        err = 6;
+                        continue;
+                    }
                 }
             }
         }
+    }
+    switch (err) {
+        case 1: return state.DoS(100, error("ConnectBlock(): inputs missing/spent"),
+                         REJECT_INVALID, "bad-txns-inputs-missingorspent");
+        case 2: return state.DoS(100, error("%s: contains a non-BIP68-final transaction",
+                                 __func__), REJECT_INVALID, "bad-txns-nonfinal");
+        case 3: return state.DoS(100, false, REJECT_INVALID, "bad-txn-sigops");
+        case 4: return state.DoS(100, error("ConnectBlock(): too many sigops"),
+                                 REJECT_INVALID, "bad-blk-sigops");
+        case 5: return error("ConnectBlock(): CheckInputs on tx failed");
+        case 6: return state.DoS(100, error("ConnectBlock(): invalid tx order"),
+                         REJECT_INVALID, "bad-txns-inputs-missingorspent");
     }
 
     int64_t nTime3 = GetTimeMicros();
@@ -2239,6 +2391,10 @@ static bool ConnectBlock(const Config &config, const CBlock &block,
              nInputs <= 1 ? 0 : 0.001 * (nTime3 - nTime2) / (nInputs - 1),
              nTimeConnect * 0.000001);
 
+    // Sum the fees from each thread
+    for (int j=0; j<vFees.size(); j++) {
+        nFees += vFees[j];
+    }
     Amount blockReward =
         nFees + GetBlockSubsidy(pindex->nHeight, consensusParams);
     if (block.vtx[0]->GetValueOut() > blockReward) {
