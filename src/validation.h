@@ -19,6 +19,7 @@
 #include "fs.h"
 #include "protocol.h" // For CMessageHeader::MessageMagic
 #include "script/script_error.h"
+#include "serialize.h"
 #include "sync.h"
 #include "versionbits.h"
 
@@ -143,7 +144,7 @@ static const unsigned int INVENTORY_BROADCAST_INTERVAL = 5;
  * Limits the impact of low-fee transaction floods.
  */
 static const unsigned int INVENTORY_BROADCAST_MAX =
-    7 * INVENTORY_BROADCAST_INTERVAL;
+    7 * MAX_SIZE / 1000000 * INVENTORY_BROADCAST_INTERVAL;
 /** Average delay between feefilter broadcasts in seconds. */
 static const unsigned int AVG_FEEFILTER_BROADCAST_INTERVAL = 10 * 60;
 /** Maximum feefilter broadcast delay after significant change. */
