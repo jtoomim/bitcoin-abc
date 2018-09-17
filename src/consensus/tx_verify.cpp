@@ -291,12 +291,20 @@ bool CheckTxInputs(const CTransaction &tx, CValidationState &state,
     if (!inputs.HaveInputs(tx)) {
         return state.Invalid(false, 0, "", "Inputs unavailable");
     }
+    std::vector<Coin> coins;
+    coins.resize(tx.vin.size());
+    for (size_t j=0; j < tx.vin.size(); j++) {
+        coins[j] = inputs.AccessCoin(tx.vin[j].prevout);
+    }
+    return CheckTxInputs(tx, state, coins, nSpendHeight);
+}
 
+bool CheckTxInputs(const CTransaction &tx, CValidationState &state,
+                   const std::vector<Coin> coins, int nSpendHeight) {
     Amount nValueIn = Amount::zero();
     Amount nFees = Amount::zero();
-    for (const auto &in : tx.vin) {
-        const COutPoint &prevout = in.prevout;
-        const Coin &coin = inputs.AccessCoin(prevout);
+    for (size_t i=0; i < tx.vin.size(); i++) {
+        const Coin &coin = coins[i];
         assert(!coin.IsSpent());
 
         // If prev is coinbase, check that it's matured

@@ -12,6 +12,7 @@
 #include "chainparams.h"
 #include "checkpoints.h"
 #include "checkqueue.h"
+#include "coins.h"
 #include "config.h"
 #include "consensus/activation.h"
 #include "consensus/consensus.h"
@@ -330,9 +331,10 @@ static bool IsReplayProtectionEnabledForCurrentBlock(const Config &config) {
 // were somehow broken and returning the wrong scriptPubKeys
 static bool
 CheckInputsFromMempoolAndCache(const CTransaction &tx, CValidationState &state,
-                               const CCoinsViewCache &view, CTxMemPool &pool,
+                               const std::vector<Coin> coins, CTxMemPool &pool,
                                const uint32_t flags, bool cacheSigStore,
-                               PrecomputedTransactionData &txdata) {
+                               PrecomputedTransactionData &txdata, 
+                               uint32_t nHeight) {
     AssertLockHeld(cs_main);
 
     // pool.cs should be locked already, but go ahead and re-take the lock here
@@ -341,8 +343,10 @@ CheckInputsFromMempoolAndCache(const CTransaction &tx, CValidationState &state,
     LOCK(pool.cs);
 
     assert(!tx.IsCoinBase());
-    for (const CTxIn &txin : tx.vin) {
-        const Coin &coin = view.AccessCoin(txin.prevout);
+    assert(tx.vin.size() == coins.size());
+    for (uint32_t i=0; i<coins.size(); i++) {
+        const CTxIn &txin = tx.vin[i];
+        const Coin &coin = coins[i];
 
         // At this point we haven't actually checked if the coins are all
         // available (or shouldn't assume we have, since CheckInputs does). So
@@ -364,8 +368,8 @@ CheckInputsFromMempoolAndCache(const CTransaction &tx, CValidationState &state,
         }
     }
 
-    return CheckInputs(tx, state, view, true, flags, cacheSigStore, true,
-                       txdata);
+    return CheckInputs(tx, state, coins, true, flags, cacheSigStore, true,
+                       txdata, nHeight);
 }
 
 static bool AcceptToMemoryPoolWorker(
@@ -510,10 +514,13 @@ static bool AcceptToMemoryPoolWorker(
 
         // Keep track of transactions that spend a coinbase, which we re-scan
         // during reorgs to ensure COINBASE_MATURITY is still met.
+        // Also, build our coins vector for later use by CheckInputs.
         bool fSpendsCoinbase = false;
-        for (const CTxIn &txin : tx.vin) {
-            const Coin &coin = view.AccessCoin(txin.prevout);
-            if (coin.IsCoinBase()) {
+        std::vector<Coin> coins;
+        coins.resize(tx.vin.size());
+        for (uint32_t i=0; i<tx.vin.size(); i++) {
+            coins[i] = view.AccessCoin(tx.vin[i].prevout);
+            if (coins[i].IsCoinBase()) {
                 fSpendsCoinbase = true;
                 break;
             }
@@ -632,12 +639,13 @@ static bool AcceptToMemoryPoolWorker(
 
         // Make sure whatever we need to activate is actually activated.
         scriptVerifyFlags |= extraFlags;
+        const int nBlockHeight = chainActive.Height() + 1;
 
         // Check against previous transactions. This is done last to help
         // prevent CPU exhaustion denial-of-service attacks.
         PrecomputedTransactionData txdata(tx);
-        if (!CheckInputs(tx, state, view, true, scriptVerifyFlags, true, false,
-                         txdata)) {
+        if (!CheckInputs(tx, state, coins, true, scriptVerifyFlags, true, false,
+                         txdata, nBlockHeight)) {
             // State filled in by CheckInputs.
             return false;
         }
@@ -660,9 +668,9 @@ static bool AcceptToMemoryPoolWorker(
         uint32_t currentBlockScriptVerifyFlags =
             GetBlockScriptFlags(config, chainActive.Tip());
 
-        if (!CheckInputsFromMempoolAndCache(tx, state, view, pool,
+        if (!CheckInputsFromMempoolAndCache(tx, state, coins, pool,
                                             currentBlockScriptVerifyFlags, true,
-                                            txdata)) {
+                                            txdata, nBlockHeight)) {
             // If we're using promiscuousmempoolflags, we may hit this normally.
             // Check if current block has some flags that scriptVerifyFlags does
             // not before printing an ominous warning.
@@ -673,9 +681,9 @@ static bool AcceptToMemoryPoolWorker(
                     __func__, txid.ToString(), FormatStateMessage(state));
             }
 
-            if (!CheckInputs(tx, state, view, true,
+            if (!CheckInputs(tx, state, coins, true,
                              MANDATORY_SCRIPT_VERIFY_FLAGS | extraFlags, true,
-                             false, txdata)) {
+                             false, txdata, nBlockHeight)) {
                 return error(
                     "%s: ConnectInputs failed against MANDATORY but not "
                     "STANDARD flags due to promiscuous mempool %s, %s",
@@ -1123,15 +1131,32 @@ bool CheckInputs(const CTransaction &tx, CValidationState &state,
                  bool scriptCacheStore,
                  const PrecomputedTransactionData &txdata,
                  std::vector<CScriptCheck> *pvChecks) {
+    std::vector<Coin> coins;
+    coins.resize(tx.vin.size());
+    for (size_t j=0; j < tx.vin.size(); j++) {
+        coins[j] = inputs.AccessCoin(tx.vin[j].prevout);
+    }
+    return CheckInputs(tx, state, coins, fScriptChecks, flags,
+                sigCacheStore, scriptCacheStore, txdata,
+                GetSpendHeight(inputs), pvChecks);
+}
+bool CheckInputs(const CTransaction &tx, CValidationState &state,
+                 const std::vector<Coin> &coins, bool fScriptChecks,
+                 const uint32_t flags, bool sigCacheStore,
+                 bool scriptCacheStore,
+                 const PrecomputedTransactionData &txdata,
+                 uint32_t nHeight,
+                 std::vector<CScriptCheck> *pvChecks) {
     assert(!tx.IsCoinBase());
 
-    if (!Consensus::CheckTxInputs(tx, state, inputs, GetSpendHeight(inputs))) {
+    if (!Consensus::CheckTxInputs(tx, state, coins, nHeight)) {
         return false;
     }
 
     if (pvChecks) {
         pvChecks->reserve(tx.vin.size());
     }
+
 
     // The first loop above does all the inexpensive checks. Only if ALL inputs
     // pass do we perform expensive ECDSA signature checks. Helps prevent CPU
@@ -1156,8 +1181,7 @@ bool CheckInputs(const CTransaction &tx, CValidationState &state,
     }
 
     for (size_t i = 0; i < tx.vin.size(); i++) {
-        const COutPoint &prevout = tx.vin[i].prevout;
-        const Coin &coin = inputs.AccessCoin(prevout);
+        const Coin &coin = coins[i];
         assert(!coin.IsSpent());
 
         // We very carefully only pass in things to CScriptCheck which are

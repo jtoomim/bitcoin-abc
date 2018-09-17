@@ -466,6 +466,14 @@ bool CheckInputs(const CTransaction &tx, CValidationState &state,
                  bool scriptCacheStore,
                  const PrecomputedTransactionData &txdata,
                  std::vector<CScriptCheck> *pvChecks = nullptr);
+bool CheckInputs(const CTransaction &tx, CValidationState &state,
+                 const std::vector<Coin> &coins, bool fScriptChecks,
+                 const uint32_t flags, bool sigCacheStore,
+                 bool scriptCacheStore,
+                 const PrecomputedTransactionData &txdata,
+                 uint32_t nHeight,
+                 std::vector<CScriptCheck> *pvChecks = nullptr);
+
 
 /**
  * Mark all the coins corresponding to a given transaction inputs as spent.
