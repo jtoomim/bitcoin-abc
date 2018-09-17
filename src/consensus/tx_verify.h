@@ -5,6 +5,8 @@
 #ifndef BITCOIN_CONSENSUS_TX_VERIFY_H
 #define BITCOIN_CONSENSUS_TX_VERIFY_H
 
+#include "coins.h"
+
 #include <cstdint>
 #include <vector>
 
@@ -30,6 +32,8 @@ namespace Consensus {
  */
 bool CheckTxInputs(const CTransaction &tx, CValidationState &state,
                    const CCoinsViewCache &inputs, int nSpendHeight);
+bool CheckTxInputs(const CTransaction &tx, CValidationState &state,
+                   const std::vector<Coin> coins, int nSpendHeight);
 
 } // namespace Consensus
 
