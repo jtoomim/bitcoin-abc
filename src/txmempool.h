@@ -488,6 +488,14 @@ private:
     //!< minimum fee to get into the pool, decreases exponentially
     mutable double rollingMinimumFeeRate;
 
+    // To keep track of what AcceptToMemoryPool is currently processing in
+    // parallel, we use two sets. One for TXIDs that might be added soon,
+    // and one for UTXOs that might be spent soon.
+    // Size is limited to the number of threads we have. Using a set instead
+    // of an unordered_set avoids siphash requirements.
+    std::set<uint256> inFlightTXIDs;
+    std::set<COutPoint> inFlightUTXOs;
+
     void trackPackageRemoved(const CFeeRate &rate);
 
 public:
@@ -574,6 +582,11 @@ public:
     void setSanityCheck(double dFrequency = 1.0) {
         nCheckFrequency = dFrequency * 4294967295.0;
     }
+
+    // Check for conflicts and reserve UTXOs/TXIDs to resolve inter-thread
+    // transaction dependencies
+    bool TryAddInFlight(const CTransaction &tx);
+    void RemoveInFlight(const CTransaction &tx);
 
     // addUnchecked must updated state for all ancestors of a given transaction,
     // to track size/count of descendant transactions. First version of

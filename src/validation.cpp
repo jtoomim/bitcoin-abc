@@ -378,7 +378,6 @@ static bool AcceptToMemoryPoolWorker(
     const CTransactionRef &ptx, bool fLimitFree, bool *pfMissingInputs,
     int64_t nAcceptTime, bool fOverrideMempoolLimit, const Amount nAbsurdFee,
     std::vector<COutPoint> &coins_to_uncache) {
-    AssertLockHeld(cs_main);
 
     const CTransaction &tx = *ptx;
     const TxId txid = tx.GetId();
@@ -390,15 +389,29 @@ static bool AcceptToMemoryPoolWorker(
         *pfMissingInputs = false;
     }
 
+    // Check for conflicts with other threads, and mark this TXID and UTXOs
+    // as in flight if no conflicts are found.
+    while (!pool.TryAddInFlight(tx)) {
+        cs_main.unlock();
+        pool.cs.unlock();
+        // Fixme: this should probably be waiting on a condition variable
+        // instead of simply sleeping for one millisecond
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        pool.cs.lock();
+        cs_main.lock();
+    }
+
     // Coinbase is only valid in a block, not as a loose transaction.
     if (!CheckRegularTransaction(tx, state)) {
         // state filled in by CheckRegularTransaction.
+        pool.RemoveInFlight(tx);
         return false;
     }
 
     // Rather not work on nonstandard transactions (unless -testnet/-regtest)
     std::string reason;
     if (fRequireStandard && !IsStandardTx(tx, reason)) {
+        pool.RemoveInFlight(tx);
         return state.DoS(0, false, REJECT_NONSTANDARD, reason);
     }
 
@@ -410,6 +423,7 @@ static bool AcceptToMemoryPoolWorker(
             config, tx, ctxState, STANDARD_LOCKTIME_VERIFY_FLAGS)) {
         // We copy the state from a dummy to ensure we don't increase the
         // ban score of peer for transaction that could be valid in the future.
+        pool.RemoveInFlight(tx);
         return state.DoS(
             0, false, REJECT_NONSTANDARD, ctxState.GetRejectReason(),
             ctxState.CorruptionPossible(), ctxState.GetDebugMessage());
@@ -417,6 +431,7 @@ static bool AcceptToMemoryPoolWorker(
 
     // Is it already in the memory pool?
     if (pool.exists(txid)) {
+        pool.RemoveInFlight(tx);
         return state.Invalid(false, REJECT_ALREADY_KNOWN,
                              "txn-already-in-mempool");
     }
@@ -426,6 +441,7 @@ static bool AcceptToMemoryPoolWorker(
         auto itConflicting = pool.mapNextTx.find(txin.prevout);
         if (itConflicting != pool.mapNextTx.end()) {
             // Disable replacement feature for good
+            pool.RemoveInFlight(tx);
             return state.Invalid(false, REJECT_CONFLICT,
                                  "txn-mempool-conflict");
         }
@@ -452,6 +468,7 @@ static bool AcceptToMemoryPoolWorker(
                     // Optimistically just do efficient check of cache for
                     // outputs.
                     if (pcoinsTip->HaveCoinInCache(COutPoint(txid, out))) {
+                        pool.RemoveInFlight(tx);
                         return state.Invalid(false, REJECT_DUPLICATE,
                                              "txn-already-known");
                     }
@@ -465,12 +482,14 @@ static bool AcceptToMemoryPoolWorker(
 
                 // fMissingInputs and !state.IsInvalid() is used to detect this
                 // condition, don't set state.Invalid()
+                pool.RemoveInFlight(tx);
                 return false;
             }
         }
 
         // Are the actual inputs available?
         if (!view.HaveInputs(tx)) {
+            pool.RemoveInFlight(tx);
             return state.Invalid(false, REJECT_DUPLICATE,
                                  "bad-txns-inputs-spent");
         }
@@ -490,11 +509,13 @@ static bool AcceptToMemoryPoolWorker(
         // CheckSequenceLocks to take a CoinsViewCache instead of create its
         // own.
         if (!CheckSequenceLocks(tx, STANDARD_LOCKTIME_VERIFY_FLAGS, &lp)) {
+            pool.RemoveInFlight(tx);
             return state.DoS(0, false, REJECT_NONSTANDARD, "non-BIP68-final");
         }
 
         // Check for non-standard pay-to-script-hash in inputs
         if (fRequireStandard && !AreInputsStandard(tx, view)) {
+            pool.RemoveInFlight(tx);
             return state.Invalid(false, REJECT_NONSTANDARD,
                                  "bad-txns-nonstandard-inputs");
         }
@@ -538,6 +559,7 @@ static bool AcceptToMemoryPoolWorker(
         // MAX_BLOCK_SIGOPS_PER_MB; we still consider this an invalid rather
         // than merely non-standard transaction.
         if (nSigOpsCount > MAX_STANDARD_TX_SIGOPS) {
+            pool.RemoveInFlight(tx);
             return state.DoS(0, false, REJECT_NONSTANDARD,
                              "bad-txns-too-many-sigops", false,
                              strprintf("%d", nSigOpsCount));
@@ -551,6 +573,7 @@ static bool AcceptToMemoryPoolWorker(
                 .GetFee(nSize);
         if (mempoolRejectFee > Amount::zero() &&
             nModifiedFees < mempoolRejectFee) {
+            pool.RemoveInFlight(tx);
             return state.DoS(0, false, REJECT_INSUFFICIENTFEE,
                              "mempool min fee not met", false,
                              strprintf("%d < %d", nFees, mempoolRejectFee));
@@ -561,6 +584,7 @@ static bool AcceptToMemoryPoolWorker(
             !AllowFree(entry.GetPriority(chainActive.Height() + 1))) {
             // Require that free transactions have sufficient priority to be
             // mined in the next block.
+            pool.RemoveInFlight(tx);
             return state.DoS(0, false, REJECT_INSUFFICIENTFEE,
                              "insufficient priority");
         }
@@ -585,6 +609,7 @@ static bool AcceptToMemoryPoolWorker(
             if (dFreeCount + nSize >=
                 gArgs.GetArg("-limitfreerelay", DEFAULT_LIMITFREERELAY) * 10 *
                     1000) {
+                pool.RemoveInFlight(tx);
                 return state.DoS(0, false, REJECT_INSUFFICIENTFEE,
                                  "rate limited free transaction");
             }
@@ -595,6 +620,7 @@ static bool AcceptToMemoryPoolWorker(
         }
 
         if (nAbsurdFee != Amount::zero() && nFees > nAbsurdFee) {
+            pool.RemoveInFlight(tx);
             return state.Invalid(false, REJECT_HIGHFEE, "absurdly-high-fee",
                                  strprintf("%d > %d", nFees, nAbsurdFee));
         }
@@ -616,6 +642,7 @@ static bool AcceptToMemoryPoolWorker(
         if (!pool.CalculateMemPoolAncestors(
                 entry, setAncestors, nLimitAncestors, nLimitAncestorSize,
                 nLimitDescendants, nLimitDescendantSize, errString)) {
+            pool.RemoveInFlight(tx);
             return state.DoS(0, false, REJECT_NONSTANDARD,
                              "too-long-mempool-chain", false, errString);
         }
@@ -648,6 +675,7 @@ static bool AcceptToMemoryPoolWorker(
         if (!CheckInputs(tx, state, coins, true, scriptVerifyFlags, true, false,
                          txdata, nBlockHeight)) {
             // State filled in by CheckInputs.
+            pool.RemoveInFlight(tx);
             return false;
         }
 
@@ -676,6 +704,7 @@ static bool AcceptToMemoryPoolWorker(
             // Check if current block has some flags that scriptVerifyFlags does
             // not before printing an ominous warning.
             if (!(~scriptVerifyFlags & currentBlockScriptVerifyFlags)) {
+                pool.RemoveInFlight(tx);
                 return error(
                     "%s: BUG! PLEASE REPORT THIS! ConnectInputs failed against "
                     "MANDATORY but not STANDARD flags %s, %s",
@@ -685,6 +714,7 @@ static bool AcceptToMemoryPoolWorker(
             if (!CheckInputs(tx, state, coins, true,
                              MANDATORY_SCRIPT_VERIFY_FLAGS | extraFlags, true,
                              false, txdata, nBlockHeight)) {
+                pool.RemoveInFlight(tx);
                 return error(
                     "%s: ConnectInputs failed against MANDATORY but not "
                     "STANDARD flags due to promiscuous mempool %s, %s",
@@ -712,6 +742,7 @@ static bool AcceptToMemoryPoolWorker(
                 gArgs.GetArg("-mempoolexpiry", DEFAULT_MEMPOOL_EXPIRY) * 60 *
                     60);
             if (!pool.exists(txid)) {
+                pool.RemoveInFlight(tx);
                 return state.DoS(0, false, REJECT_INSUFFICIENTFEE,
                                  "mempool full");
             }
@@ -719,6 +750,7 @@ static bool AcceptToMemoryPoolWorker(
     }
 
     GetMainSignals().TransactionAddedToMempool(ptx);
+    pool.RemoveInFlight(tx);
     return true;
 }
 

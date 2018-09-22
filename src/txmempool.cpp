@@ -412,6 +412,35 @@ void CTxMemPool::AddTransactionsUpdated(unsigned int n) {
     LOCK(cs);
     nTransactionsUpdated += n;
 }
+bool CTxMemPool::TryAddInFlight(const CTransaction &tx) {
+    LOCK(cs);
+    // Check for conflict
+    if (inFlightTXIDs.find(tx.GetId()) != inFlightTXIDs.end()) {
+        return false;
+    }
+    for (auto &input : tx.vin) {
+        if (inFlightUTXOs.find(input.prevout) != inFlightUTXOs.end()) {
+            return false;
+        }
+        if (inFlightTXIDs.find(input.prevout.GetTxId()) != inFlightTXIDs.end()) {
+            return false;
+        }
+    }
+    // Reserve these UTXOs and TXID
+    inFlightTXIDs.insert(tx.GetId());
+    for (auto &input : tx.vin) {
+        inFlightUTXOs.insert(input.prevout);
+    }
+    return true;
+}
+
+void CTxMemPool::RemoveInFlight(const CTransaction &tx) {
+    LOCK(cs);
+    inFlightTXIDs.erase(tx.GetId());
+    for (auto &input : tx.vin) {
+        inFlightUTXOs.erase(input.prevout);
+    }
+}
 
 bool CTxMemPool::addUnchecked(const uint256 &hash, const CTxMemPoolEntry &entry,
                               setEntries &setAncestors, bool validFeeEstimate) {
