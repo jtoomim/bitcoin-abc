@@ -2,9 +2,15 @@
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
+#include "config.h"
+#include "consensus/validation.h"
+#include "keystore.h"
+#include "script/scriptcache.h"
+#include "script/sign.h"
 #include "policy/policy.h"
 #include "txmempool.h"
 #include "util.h"
+#include "validation.h"
 
 #include "test/test_bitcoin.h"
 
@@ -663,5 +669,291 @@ BOOST_AUTO_TEST_CASE(MempoolSizeLimitTest) {
 
     SetMockTime(0);
 }
+
+static bool ToMemPool(const CTransaction &tx) {
+    CValidationState state;
+    bool res = AcceptToMemoryPool(GetConfig(), mempool, state,
+                              MakeTransactionRef(tx), false, nullptr, true,
+                              Amount::zero());
+    //if (!res) std::cout << FormatStateMessage(state) << "\n";
+    return res;
+}
+
+
+BOOST_FIXTURE_TEST_CASE(threading_test, TestChain100Setup) {
+    // Test that we can send a bunch of transactions to AcceptToMemoryPool
+    // in parallel threads while correctly resolving conflicts
+
+    InitScriptExecutionCache();
+
+    CScript p2pk_scriptPubKey =
+        CScript() << ToByteVector(coinbaseKey.GetPubKey()) << OP_CHECKSIG;
+    CScript p2sh_scriptPubKey =
+        GetScriptForDestination(CScriptID(p2pk_scriptPubKey));
+    CScript p2pkh_scriptPubKey =
+        GetScriptForDestination(coinbaseKey.GetPubKey().GetID());
+
+    CBasicKeyStore keystore;
+    keystore.AddKey(coinbaseKey);
+    keystore.AddCScript(p2pk_scriptPubKey);
+
+    std::vector<CMutableTransaction> vTxBuffer1;
+    std::vector<CMutableTransaction> vTxBuffer2;
+    std::vector<CTransaction> vOrphanBuffer;
+    std::vector<COutPoint> vUTXOBuffer0;
+    std::vector<COutPoint> vUTXOBuffer1;
+    std::vector<COutPoint> vUTXOBuffer2;
+
+    const int nTxCount = 2000;
+    vTxBuffer1.resize(nTxCount);
+    vTxBuffer2.resize(nTxCount);
+    vUTXOBuffer0.resize(nTxCount);
+    vUTXOBuffer1.resize(nTxCount);
+    vUTXOBuffer2.resize(nTxCount);
+
+
+    int64_t nTime0 = GetTimeMicros();
+
+    // Generate a bunch of UTXOs
+    CMutableTransaction mutableSpend_tx;
+    mutableSpend_tx.nVersion = 1;
+    mutableSpend_tx.vin.resize(1);
+    mutableSpend_tx.vin[0].prevout = COutPoint(coinbaseTxns[0].GetId(), 0);
+    mutableSpend_tx.vout.resize(nTxCount);
+    for (int i=0; i<nTxCount; i++) {
+        mutableSpend_tx.vout[i].nValue = coinbaseTxns[0].vout[0].nValue / nTxCount;
+        mutableSpend_tx.vout[i].nValue -= (60+i) * SATOSHI; // fee of ~2 sat/byte
+        mutableSpend_tx.vout[i].scriptPubKey = p2pk_scriptPubKey;
+        vUTXOBuffer0[i] = COutPoint();
+    }
+    // Sign
+    {
+        std::vector<uint8_t> vchSig;
+        uint256 hash = SignatureHash(
+            p2pk_scriptPubKey, CTransaction(mutableSpend_tx), 0,
+            SigHashType().withForkId(), coinbaseTxns[0].vout[0].nValue);
+        BOOST_CHECK(coinbaseKey.Sign(hash, vchSig));
+        vchSig.push_back(uint8_t(SIGHASH_ALL | SIGHASH_FORKID));
+        mutableSpend_tx.vin[0].scriptSig << vchSig;
+    }
+
+    const CTransaction spend_tx(mutableSpend_tx);
+    for (int i=0; i<nTxCount; i++) {
+        vUTXOBuffer0[i] = COutPoint(spend_tx.GetId(), i);
+    }
+    {
+        LOCK(cs_main);
+        BOOST_CHECK(ToMemPool(spend_tx));
+    }
+
+
+
+    CBlock block;
+    block = CreateAndProcessBlockFromMempool(p2pk_scriptPubKey);
+    BOOST_CHECK(chainActive.Tip()->GetBlockHash() == block.GetHash());
+    int64_t nTime1 = GetTimeMicros();
+    std::cout << "Creating UTXOs and mining first block took " << nTime1-nTime0 << " usec\n";
+
+    // Create a bunch of 1-in, 1-out transactions
+
+    // This pragma does not change functionality, but speeds up the test if
+    // compiled with -fopenmp
+    #pragma omp parallel for
+    for (int i=0; i<nTxCount; i++) {
+        CMutableTransaction new_tx;
+        new_tx = CMutableTransaction();
+        new_tx.nVersion = 1;
+        new_tx.vin.resize(1);
+        new_tx.vout.resize(1);
+        new_tx.vin[0].prevout = vUTXOBuffer0[i];
+        new_tx.vout[0].nValue = spend_tx.vout[i].nValue - 400 * SATOSHI;
+        new_tx.vout[0].scriptPubKey = p2pk_scriptPubKey;
+
+        // Sign
+        std::vector<uint8_t> vchSig;
+        uint256 hash = SignatureHash(
+            p2pk_scriptPubKey, CTransaction(new_tx), 0,
+            SigHashType().withForkId(), spend_tx.vout[i].nValue);
+        coinbaseKey.Sign(hash, vchSig);
+        vchSig.push_back(uint8_t(SIGHASH_ALL | SIGHASH_FORKID));
+        new_tx.vin[0].scriptSig << vchSig;
+
+        vTxBuffer1[i] = new_tx;
+        vUTXOBuffer1[i] = COutPoint(new_tx.GetId(), 0);
+    }
+
+    int64_t nTime2 = GetTimeMicros();
+    std::cout << "Creating and signing 1st batch of txes took " << nTime2-nTime1 << " usec\n";
+
+    #pragma omp parallel for
+    for (int i=0; i<nTxCount; i++) {
+        const CTransaction out_tx(vTxBuffer1[i]);
+        LOCK(cs_main);
+        ToMemPool(out_tx);
+    }
+    BOOST_CHECK(mempool.size() == nTxCount);
+    int64_t nTime3 = GetTimeMicros();
+    std::cout << "Adding 1st batch of txes to mempool took " << nTime3-nTime2 << " usec, or " << (nTime3-nTime2)/nTxCount << "usec/sigop\n";
+
+    // Createa a bunch of double-spend 1-in, 1-out transactions
+    #pragma omp parallel for
+    for (int i=0; i<nTxCount; i++) {
+        CMutableTransaction new_tx;
+        new_tx = CMutableTransaction();
+        new_tx.nVersion = 1;
+        new_tx.vin.resize(1);
+        new_tx.vout.resize(1);
+        new_tx.vin[0].prevout = vUTXOBuffer0[i];
+        new_tx.vout[0].nValue = spend_tx.vout[i].nValue - 401 * SATOSHI;
+        new_tx.vout[0].scriptPubKey = p2pk_scriptPubKey;
+
+        // Sign
+        std::vector<uint8_t> vchSig;
+        uint256 hash = SignatureHash(
+            p2pk_scriptPubKey, CTransaction(new_tx), 0,
+            SigHashType().withForkId(), spend_tx.vout[i].nValue);
+        coinbaseKey.Sign(hash, vchSig);
+        vchSig.push_back(uint8_t(SIGHASH_ALL | SIGHASH_FORKID));
+        new_tx.vin[0].scriptSig << vchSig;
+
+        vTxBuffer2[i] = new_tx;
+        vUTXOBuffer2[i] = COutPoint(new_tx.GetId(), 0);
+    }
+
+    int64_t nTime4 = GetTimeMicros();
+    std::cout << "Creating and signing 2nd batch of txes (double-spends) took " << nTime4-nTime3 << " usec\n";
+
+    mempool.clear();
+
+
+    int nBuffer1Successes = 0;
+    int nBuffer2Successes = 0;
+    #pragma omp parallel
+    {
+        #pragma omp single
+        {
+            for (int i=0; i<nTxCount; i++) {
+                #pragma omp task
+                {
+                    const CTransaction out_tx1(vTxBuffer1[i]);
+                    LOCK(cs_main);
+                    if (ToMemPool(out_tx1)) {
+                        #pragma omp atomic
+                        nBuffer1Successes++;
+                    }
+                }
+                #pragma omp task
+                {
+                    const CTransaction out_tx2(vTxBuffer2[i]);
+                    LOCK(cs_main);
+                    if (ToMemPool(out_tx2)) {
+                        #pragma omp atomic
+                        nBuffer2Successes++;
+                    }
+                }
+            }
+        }
+    }
+    std::cout << "Accepted from first buffer: " << nBuffer1Successes << " accepted from second buffer: " << nBuffer2Successes << "\n";
+    BOOST_CHECK(mempool.size() == nTxCount);
+    int64_t nTime5 = GetTimeMicros();
+    std::cout << "Adding 2nd batch of txes to mempool took " << nTime5-nTime4 << " usec, or " << (nTime5-nTime4)/nTxCount << "usec/sigop\n";
+
+    for (int i=0; i<nTxCount; i++) {
+        bool a = mempool.mapTx.find(vTxBuffer1[i].GetId()) == mempool.mapTx.end();
+        bool b = mempool.mapTx.find(vTxBuffer2[i].GetId()) == mempool.mapTx.end();
+        BOOST_CHECK(a != b);
+    }
+
+    mempool.clear();
+
+    // Createa a bunch of dependent-spend 1-in, 1-out transactions
+    #pragma omp parallel for
+    for (int i=0; i<nTxCount; i++) {
+        CMutableTransaction new_tx;
+        new_tx = CMutableTransaction();
+        new_tx.nVersion = 1;
+        new_tx.vin.resize(1);
+        new_tx.vout.resize(1);
+        new_tx.vin[0].prevout = vUTXOBuffer1[i];
+        new_tx.vout[0].nValue = vTxBuffer1[i].vout[0].nValue - 402 * SATOSHI;
+        new_tx.vout[0].scriptPubKey = p2pk_scriptPubKey;
+
+        // Sign
+        std::vector<uint8_t> vchSig;
+        uint256 hash = SignatureHash(
+            p2pk_scriptPubKey, CTransaction(new_tx), 0,
+            SigHashType().withForkId(), vTxBuffer1[i].vout[0].nValue);
+        coinbaseKey.Sign(hash, vchSig);
+        vchSig.push_back(uint8_t(SIGHASH_ALL | SIGHASH_FORKID));
+        new_tx.vin[0].scriptSig << vchSig;
+
+        vTxBuffer2[i] = new_tx;
+        vUTXOBuffer2[i] = COutPoint(new_tx.GetId(), i);
+    }
+    int64_t nTime6 = GetTimeMicros();
+    std::cout << "Creating and signing 3rd batch of txes (children) took " << nTime6-nTime5 << " usec\n";
+
+    nBuffer1Successes = 0;
+    nBuffer2Successes = 0;
+    #pragma omp parallel
+    {
+        #pragma omp single
+        {
+            for (int i=0; i<nTxCount; i++) {
+                #pragma omp task
+                {
+                    const CTransaction out_tx1(vTxBuffer1[i]);
+                    LOCK(cs_main);
+                    if (ToMemPool(out_tx1)) {
+                        #pragma omp atomic
+                        nBuffer1Successes++;
+                    }
+                }
+                #pragma omp task
+                {
+                    const CTransaction out_tx2(vTxBuffer2[i]);
+                    LOCK(cs_main);
+                    if (ToMemPool(out_tx2)) {
+                        #pragma omp atomic
+                        nBuffer2Successes++;
+                    }
+                    else {
+                        //If out_tx1 grabs the lock first, it should enter
+                        // itself into the inFlightTXIDs, which will make
+                        // out_tx2 delay its processing until out_tx1 has been
+                        // fully added. However, if out_tx2 grabs the lock
+                        // first, then out_tx2 will not be accepted due to
+                        // missing inputs.
+                        // These transactions would normally get marked as
+                        // orphans in net_processing.cpp:ProcessMessage and
+                        // queued for later processing upon receipt of their
+                        // parents, but we just want to make sure that at
+                        // least some of them make it in on the first pass and
+                        // that we don't crash and burn.
+                        vOrphanBuffer.push_back(out_tx2);
+
+                    }
+                }
+            }
+        }
+    }
+    std::cout << "Accepted from first buffer: " << nBuffer1Successes << " accepted from second buffer: " << nBuffer2Successes << "\n";
+    int64_t nTime7 = GetTimeMicros();
+    std::cout << "Adding 3rd batch of txes to mempool took " << nTime7-nTime6 << " usec, or " << (nTime7-nTime6)/(nBuffer1Successes + nBuffer2Successes) << "usec/sigop\n";
+
+    for (CTransaction tx : vOrphanBuffer) {
+        LOCK(cs_main);
+        if (ToMemPool(tx)) {
+            nBuffer2Successes++;
+        }
+    }
+    for (int i=0; i<nTxCount; i++) {
+        BOOST_CHECK(mempool.mapTx.find(vTxBuffer1[i].GetId()) != mempool.mapTx.end());
+        BOOST_CHECK(mempool.mapTx.find(vTxBuffer2[i].GetId()) != mempool.mapTx.end());
+    }
+
+}
+
 
 BOOST_AUTO_TEST_SUITE_END()

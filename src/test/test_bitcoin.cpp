@@ -170,6 +170,29 @@ CBlock TestChain100Setup::CreateAndProcessBlock(
     return result;
 }
 
+CBlock TestChain100Setup::CreateAndProcessBlockFromMempool(
+                            const CScript &scriptPubKey) {
+    const Config &config = GetConfig();
+    std::unique_ptr<CBlockTemplate> pblocktemplate =
+        BlockAssembler(config).CreateNewBlock(scriptPubKey);
+    CBlock &block = pblocktemplate->block;
+
+    // IncrementExtraNonce creates a valid coinbase and merkleRoot
+    unsigned int extraNonce = 0;
+    IncrementExtraNonce(config, &block, chainActive.Tip(), extraNonce);
+
+    while (!CheckProofOfWork(block.GetHash(), block.nBits, config)) {
+        ++block.nNonce;
+    }
+
+    std::shared_ptr<const CBlock> shared_pblock =
+        std::make_shared<const CBlock>(block);
+    ProcessNewBlock(GetConfig(), shared_pblock, true, nullptr);
+
+    CBlock result = block;
+    return result;
+}
+
 TestChain100Setup::~TestChain100Setup() {}
 
 CTxMemPoolEntry TestMemPoolEntryHelper::FromTx(const CMutableTransaction &tx,

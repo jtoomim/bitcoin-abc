@@ -377,7 +377,11 @@ static bool AcceptToMemoryPoolWorker(
     const Config &config, CTxMemPool &pool, CValidationState &state,
     const CTransactionRef &ptx, bool fLimitFree, bool *pfMissingInputs,
     int64_t nAcceptTime, bool fOverrideMempoolLimit, const Amount nAbsurdFee,
-    std::vector<COutPoint> &coins_to_uncache) {
+    std::vector<COutPoint> &coins_to_uncache, bool *pfHoldLock) {
+    // cs_main needs to be (recursively) locked exactly once in order for us
+    // to receive any performance benefit. If it has been recursively locked
+    // twice or more, then this function will never fully unlock it.
+    AssertLockHeld(cs_main);
 
     const CTransaction &tx = *ptx;
     const TxId txid = tx.GetId();
@@ -396,9 +400,9 @@ static bool AcceptToMemoryPoolWorker(
         pool.cs.unlock();
         // Fixme: this should probably be waiting on a condition variable
         // instead of simply sleeping for one millisecond
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-        pool.cs.lock();
+        //std::this_thread::sleep_for(std::chrono::milliseconds(1));
         cs_main.lock();
+        pool.cs.lock();
     }
 
     // Coinbase is only valid in a block, not as a loose transaction.
@@ -669,12 +673,23 @@ static bool AcceptToMemoryPoolWorker(
         scriptVerifyFlags |= extraFlags;
         const int nBlockHeight = chainActive.Height() + 1;
 
+        // CPU intensive parts come next
+        auto chainTipAtStart = chainActive.Tip();
+        if (!*pfHoldLock) {
+            cs_main.unlock();
+            pool.cs.unlock();
+        }
+
         // Check against previous transactions. This is done last to help
         // prevent CPU exhaustion denial-of-service attacks.
         PrecomputedTransactionData txdata(tx);
         if (!CheckInputs(tx, state, coins, true, scriptVerifyFlags, true, false,
                          txdata, nBlockHeight)) {
             // State filled in by CheckInputs.
+            if (!*pfHoldLock) {
+                cs_main.lock();
+                pool.cs.lock();
+            }
             pool.RemoveInFlight(tx);
             return false;
         }
@@ -704,6 +719,10 @@ static bool AcceptToMemoryPoolWorker(
             // Check if current block has some flags that scriptVerifyFlags does
             // not before printing an ominous warning.
             if (!(~scriptVerifyFlags & currentBlockScriptVerifyFlags)) {
+                if (!*pfHoldLock) {
+                    cs_main.lock();
+                    pool.cs.lock();
+                }
                 pool.RemoveInFlight(tx);
                 return error(
                     "%s: BUG! PLEASE REPORT THIS! ConnectInputs failed against "
@@ -714,6 +733,10 @@ static bool AcceptToMemoryPoolWorker(
             if (!CheckInputs(tx, state, coins, true,
                              MANDATORY_SCRIPT_VERIFY_FLAGS | extraFlags, true,
                              false, txdata, nBlockHeight)) {
+                if (!*pfHoldLock) {
+                    cs_main.lock();
+                    pool.cs.lock();
+                }
                 pool.RemoveInFlight(tx);
                 return error(
                     "%s: ConnectInputs failed against MANDATORY but not "
@@ -724,6 +747,15 @@ static bool AcceptToMemoryPoolWorker(
             LogPrintf("Warning: -promiscuousmempool flags set to not include "
                       "currently enforced soft forks, this may break mining or "
                       "otherwise cause instability!\n");
+        }
+        if (!*pfHoldLock) {
+            cs_main.lock();
+            pool.cs.lock();
+            if (chainTipAtStart != chainActive.Tip()) {
+                *pfHoldLock = true;
+                pool.RemoveInFlight(tx);
+                return false;
+            }
         }
 
         // This transaction should only count for fee estimation if
@@ -763,9 +795,15 @@ static bool AcceptToMemoryPoolWithTime(
     int64_t nAcceptTime, bool fOverrideMempoolLimit = false,
     const Amount nAbsurdFee = Amount::zero()) {
     std::vector<COutPoint> coins_to_uncache;
+    bool fHoldLock = false;
     bool res = AcceptToMemoryPoolWorker(
         config, pool, state, tx, fLimitFree, pfMissingInputs, nAcceptTime,
-        fOverrideMempoolLimit, nAbsurdFee, coins_to_uncache);
+        fOverrideMempoolLimit, nAbsurdFee, coins_to_uncache, &fHoldLock);
+    if (!res && fHoldLock) {
+        res = AcceptToMemoryPoolWorker(
+            config, pool, state, tx, fLimitFree, pfMissingInputs, nAcceptTime,
+            fOverrideMempoolLimit, nAbsurdFee, coins_to_uncache, &fHoldLock);
+    }
     if (!res) {
         for (const COutPoint &outpoint : coins_to_uncache) {
             pcoinsTip->Uncache(outpoint);
