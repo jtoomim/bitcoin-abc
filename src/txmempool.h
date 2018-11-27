@@ -235,6 +235,13 @@ struct mempoolentry_txid {
     }
 };
 
+class CompareTxMemPoolEntryByTxId {
+public:
+    bool operator()(const CTxMemPoolEntry &a, const CTxMemPoolEntry &b) const {
+        return b.GetTx().GetId() > a.GetTx().GetId();
+    }
+};
+
 /** \class CompareTxMemPoolEntryByDescendantScore
  *
  *  Sort an entry by max(score/size of entry's tx, score/size with all
@@ -321,6 +328,7 @@ public:
 };
 
 // Multi_index tag names
+struct txid_score {};
 struct descendant_score {};
 struct entry_time {};
 struct mining_score {};
@@ -499,13 +507,19 @@ public:
                              boost::multi_index::ordered_non_unique<
                                  boost::multi_index::tag<ancestor_score>,
                                  boost::multi_index::identity<CTxMemPoolEntry>,
-                                 CompareTxMemPoolEntryByAncestorFee>>>
+                                 CompareTxMemPoolEntryByAncestorFee>,
+                             // sorted by txid without siphash
+                             boost::multi_index::ordered_unique<
+                                 boost::multi_index::tag<txid_score>,
+                                 boost::multi_index::identity<CTxMemPoolEntry>,
+                                 CompareTxMemPoolEntryByTxId>>>
         indexed_transaction_set;
 
     mutable CCriticalSection cs;
     indexed_transaction_set mapTx GUARDED_BY(cs);
 
     typedef indexed_transaction_set::nth_index<0>::type::iterator txiter;
+    typedef indexed_transaction_set::nth_index<5>::type::iterator txitersorted;
     //!< All tx hashes/entries in mapTx, in random order
     std::vector<std::pair<uint256, txiter>> vTxHashes;
 

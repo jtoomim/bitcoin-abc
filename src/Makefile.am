@@ -212,6 +212,7 @@ BITCOIN_CORE_H = \
   validationinterface.h \
   versionbits.h \
   walletinitinterface.h \
+  xthinner.h \
   wallet/coincontrol.h \
   wallet/coinselection.h \
   wallet/crypter.h \
@@ -287,6 +288,7 @@ libbitcoin_server_a_SOURCES = \
   ui_interface.cpp \
   validation.cpp \
   validationinterface.cpp \
+  xthinner.cpp \
   $(BITCOIN_CORE_H)
 
 if ENABLE_ZMQ

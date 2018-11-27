@@ -125,6 +125,7 @@ BITCOIN_TESTS =\
   test/univalue_tests.cpp \
   test/util_tests.cpp \
   test/validation_tests.cpp \
+  test/xthinner_tests.cpp \
   test/work_comparator_tests.cpp \
   rpc/test/server_tests.cpp
 

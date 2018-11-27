@@ -367,6 +367,7 @@ add_library(server
 	ui_interface.cpp
 	validation.cpp
 	validationinterface.cpp
+	xthinner.cpp
 )
 
 # This require libevent
