@@ -322,6 +322,7 @@ enum ServiceFlags : uint64_t {
     // NODE_AVALANCHE means the node supports Bitcoin Cash's avalanche
     // preconsensus mechanism.
     NODE_AVALANCHE = (1 << 24),
+    NODE_XTHINNER = (1 << 27),
 };
 
 /**
@@ -423,6 +424,7 @@ enum GetDataMsg {
     MSG_FILTERED_BLOCK = 3,
     //!< Defined in BIP152
     MSG_CMPCT_BLOCK = 4,
+    MSG_XTHR_BLOCK = 5,
 };
 
 /**
