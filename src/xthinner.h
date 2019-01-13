@@ -88,6 +88,8 @@ public:
     XthinnerBlock() {}
     XthinnerBlock(const CBlock &block, const CTxMemPool &pool);
     int FillBlock(CBlock &block, const CTxMemPool &pool);
+    void GetMissing(std::vector<std::vector<uint32_t> > &vvMissing);
+    int Update(CBlock &block, const std::vector<std::vector<PrefilledTransaction> > &extra);
 
     ADD_SERIALIZE_METHODS;
 
@@ -98,4 +100,7 @@ public:
         READWRITE(segments);
     }
 };
+
+int FetchTxFromBlock(const CBlock &block, const std::vector<uint32_t> &vMissing, std::vector<PrefilledTransaction> &extra);
+int FetchTxFromBlock(const CBlock &block, const std::vector<std::vector<uint32_t> > &vvMissing, std::vector<std::vector<PrefilledTransaction> > &vExtra);
 #endif

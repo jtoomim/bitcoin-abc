@@ -339,11 +339,11 @@ int XthinnerSegment::ToTXIDs(std::vector<CTransactionRef> &vtx, const CTxMemPool
 
         if (ex_iter != mapExtra.end() && ex_iter->first < pos) ex_iter++;
         if (pf_iter != prefilled.end() && pf_iter->index == pos) {
-            if (debug>2) std::cout << "Found prefilled at pos=" << pos << " with hash " << pf_iter->tx->GetId().GetHex() << "\n";
+            if (debug>3) std::cout << "Found prefilled at pos=" << pos << " with hash " << pf_iter->tx->GetId().GetHex() << "\n";
             vtx[pos] = pf_iter->tx;
             pf_iter++;
         } else if (ex_iter != mapExtra.end() && ex_iter->first == pos) {
-            std::cout << "Found extra at pos=" << pos << " with hash " << ex_iter->second->GetId().GetHex() << "\n";
+            if (debug>3) std::cout << "Found extra at pos=" << pos << " with hash " << ex_iter->second->GetId().GetHex() << "\n";
             vtx[pos] = ex_iter->second;
             ex_iter++;
         } else {
@@ -396,7 +396,7 @@ int XthinnerSegment::ToTXIDs(std::vector<CTransactionRef> &vtx, const CTxMemPool
                 if (debug > 3) std::cout << "Transaction ambiguous! Pos " << pos << " stack " << stackTxId.GetHex() << " matches "
                           << it->GetTx().GetId().GetHex() << " and " << postit->GetTx().GetId().GetHex() << "\n";
                 nAmbiguous++;
-                for (int i=1; i<checksumSpec.size(); i++) {expectError[i]=true;}
+                for (int i=0; i<checksumSpec.size(); i++) {expectError[i]=true;}
             }
         }
 
@@ -495,8 +495,6 @@ int XthinnerSegment::Update(std::vector<CTransactionRef> &vtx, const std::vector
     return 0;
 }
 
-//int XthinnerSegment::FetchExtra(std::vector<CTransactionRef> &vtx, )
-
 XthinnerBlock::XthinnerBlock(const CBlock &block, const CTxMemPool &pool) : header(block) {
     txcount = block.vtx.size();
     segments.resize(1);
@@ -526,12 +524,61 @@ int XthinnerBlock::FillBlock(CBlock &block, const CTxMemPool &pool) {
             std::cout << "ToTXIDs returned status " << result << "\n";
             return result;
         }
-        if (segments[i].vMissing.size()) {
-            std::cout << "In FillBlock, " << segments[i].vMissing.size() << " transactions were missing!\n";
-            return i;
-        }
         start += segments[i].size();
     }
-    std::cout << "Finished FillBlock(...)\n";
+
+    int nMissing = 0;
+    for (int i=0; i<segments.size(); i++) {
+        nMissing += segments[i].vMissing.size();
+    }
+    if (nMissing) {
+        std::cout << "In FillBlock, " << nMissing << " transactions still missing or ambiguous\n";
+    }
+    return 0;
+}
+
+void XthinnerBlock::GetMissing(std::vector<std::vector<uint32_t> > &vvMissing) {
+    vvMissing.clear();
+    vvMissing.reserve(segments.size());
+    for (auto seg : segments) {
+        vvMissing.push_back(seg.vMissing);
+    }
+}
+
+int XthinnerBlock::Update(CBlock &block, const std::vector<std::vector<PrefilledTransaction> > &extra) {
+    int start = 0;
+    for (int i=0; i<segments.size(); i++) {
+        segments[i].Update(block.vtx, extra[i], start);
+        start += segments[i].size();
+    }
+    return 0;
+}
+
+int FetchTxFromBlock(const CBlock &block, const std::vector<uint32_t> &vMissing, std::vector<PrefilledTransaction> &extra) {
+    extra.clear();
+    if (vMissing.size() > block.vtx.size()) {std::cout << "More missing than block size? " << block.vtx.size() << " " << vMissing.size() << "\n"; return 1;} // ain't nobody got time for that
+    extra.resize(vMissing.size());
+    for (int i=0; i<vMissing.size(); i++) {
+        if (vMissing[i] > block.vtx.size()) {
+            extra.clear();
+            std::cout << "Error! Trying to fetch an index outside block size\n";
+            return 1;
+        }
+        extra[i].index = vMissing[i];
+        extra[i].tx = block.vtx[vMissing[i]];
+    }
+    std::cout << "Adding " << extra.size() << " extra transactions\n";
+    return 0;
+}
+
+int FetchTxFromBlock(const CBlock &block, const std::vector<std::vector<uint32_t> > &vvMissing, std::vector<std::vector<PrefilledTransaction> > &vExtra) {
+    vExtra.clear();
+    vExtra.resize(vvMissing.size());
+    std::cout << vvMissing[0].size() << " is the size of vvMissing[0]\n";
+    int res;
+    for (int i=0; i<vvMissing.size(); i++) {
+        res = FetchTxFromBlock(block, vvMissing[i], vExtra[i]);
+        if (res) {std::cout << "Uh oh! inner FetchTx errored!\n"; return res;}
+    }
     return 0;
 }

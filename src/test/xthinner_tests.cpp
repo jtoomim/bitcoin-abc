@@ -68,12 +68,12 @@ BOOST_AUTO_TEST_CASE(SimpleRoundTripTest) {
     CTxMemPool pool2;
     TestMemPoolEntryHelper entry;
     CBlock block(BuildBlockTestCase());
-    const int tx_count = 250000;
-    // These next two options add mempool desyncrhony. The ability to handle desynchrony is not
-    // yet complete for XthinnerBlock, but works for XthinnerSegment with the code in the first
-    // half of this test.
-    const int recipientMissingTx = tx_count / 1000;
-    const int recipientExtraTx = tx_count / 100;
+    const int tx_count = 2000;
+    // These next two options add mempool desyncrhony. High desynchrony
+    // increases the chance of checksum errors which would require
+    // a second or third pass.
+    const int recipientMissingTx = tx_count / 4;
+    const int recipientExtraTx = tx_count / 4;
     block.vtx.reserve(2 + tx_count);
 
     // If these lines are commented out, these transactions will be detected as missing by
@@ -102,7 +102,7 @@ BOOST_AUTO_TEST_CASE(SimpleRoundTripTest) {
         if (i >= recipientMissingTx)
             pool2.addUnchecked(new_tx.GetId(), entry.FromTx(new_tx));
 
-        if (i<tx_count) {
+        if (i<tx_count/2) {
             vTx.push_back(new_tx);
         }
     }
@@ -160,12 +160,9 @@ BOOST_AUTO_TEST_CASE(SimpleRoundTripTest) {
     int TTL = 4;
     while (TTL-- && seg2.vMissing.size()) {
         std::cout << "seg2.vMissing.size() = " << seg2.vMissing.size() << " on seg2.Update() round " << 4-TTL << "\n";
-        for (int i=0; i<seg2.vMissing.size(); i++) {
-            PrefilledTransaction pf;
-            pf.index = seg2.vMissing[i];
-            pf.tx = block.vtx[seg2.vMissing[i]];
-            extra.push_back(pf);
-        }
+        BOOST_CHECK(!FetchTxFromBlock(block, seg2.vMissing, extra));
+
+        // check data sizes
         CDataStream streamMissing(SER_NETWORK, PROTOCOL_VERSION);
         CDataStream streamExtra(SER_NETWORK, PROTOCOL_VERSION);
         streamMissing << seg2.vMissing;
@@ -174,9 +171,6 @@ BOOST_AUTO_TEST_CASE(SimpleRoundTripTest) {
         sendBytes += streamMissing.str().size();
         recvBytes += streamExtra.str().size();
 
-        for (auto it : extra) {
-            seg2.mapExtra[it.index] = it.tx;
-        }
         BOOST_CHECK(!seg2.Update(decodedVTx, extra, 0));
     }
 
@@ -198,6 +192,7 @@ BOOST_AUTO_TEST_CASE(SimpleRoundTripTest) {
     }
 
     std::cout << "Segment decoding was successful! Total bytes " << sendBytes << "/" << recvBytes << " tx/rx\n";
+    std::cout << "\nBeginning block transmission tests\n";
 
     // Check XthinnerBlock object creation, de/serialization
     XthinnerBlock xtblksrc(block, pool);
@@ -207,6 +202,37 @@ BOOST_AUTO_TEST_CASE(SimpleRoundTripTest) {
     stream2 >> xtblkdest;
     CBlock decBlock;
     xtblkdest.FillBlock(decBlock, pool2);
+
+    std::vector<std::vector<uint32_t> > vvMissing;
+    std::vector<std::vector<PrefilledTransaction> > vExtra;
+    TTL = 4;
+    while (TTL--) {
+        xtblkdest.GetMissing(vvMissing);
+        int nMissing = 0;
+        for (int i=0; i<vvMissing.size(); i++) {
+            nMissing += vvMissing[i].size();
+        }
+        if (!nMissing) break;
+        std::cout << "xtblkdest still missing " << nMissing << " on seg2.Update() round " << 4-TTL << "\n";
+
+        BOOST_CHECK(!FetchTxFromBlock(block, vvMissing, vExtra));
+        int nExtra = 0;
+        for (int i=0; i<vExtra.size(); i++) {
+            nExtra += vExtra[i].size();
+        }
+        std::cout << "Giving " << nExtra << " more tx to xtblkdest in " << vExtra.size() << " chunks\n";
+        // check data sizes
+        CDataStream streamMissing(SER_NETWORK, PROTOCOL_VERSION);
+        CDataStream streamExtra(SER_NETWORK, PROTOCOL_VERSION);
+        streamMissing << vvMissing;
+        streamExtra << vExtra;
+        std::cout << "Requesting " << nMissing << " tx took " << streamMissing.str().size() << "/" << streamExtra.str().size() << " bytes tx/rx\n";
+        /*sendBytes += streamMissing.str().size();
+        recvBytes += streamExtra.str().size();*/
+
+        BOOST_CHECK(!xtblkdest.Update(decBlock, vExtra));
+    }
+
 
     for (int i=0; i<decodedVTx.size(); i++) {
         if (decodedVTx[i]->GetId() != block.vtx[i]->GetId()) {
