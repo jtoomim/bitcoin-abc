@@ -519,7 +519,6 @@ public:
     indexed_transaction_set mapTx GUARDED_BY(cs);
 
     typedef indexed_transaction_set::nth_index<0>::type::iterator txiter;
-    typedef indexed_transaction_set::nth_index<5>::type::iterator txitersorted;
     //!< All tx hashes/entries in mapTx, in random order
     std::vector<std::pair<uint256, txiter>> vTxHashes;
 
