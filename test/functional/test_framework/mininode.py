@@ -43,6 +43,8 @@ from test_framework.messages import (
     msg_tx,
     msg_verack,
     msg_version,
+    msg_xtrconfig,
+    msg_xtrblk,
     NODE_NETWORK,
     READ_BUFFER_SIZE,
     sha256,
@@ -73,6 +75,8 @@ MESSAGEMAP = {
     b"tx": msg_tx,
     b"verack": msg_verack,
     b"version": msg_version,
+    b"xtrconfig": msg_xtrconfig,
+    b"xtrblk": msg_xtrblk,
 }
 
 MAGIC_BYTES = {

@@ -234,7 +234,8 @@ class CInv():
         0: "Error",
         1: "TX",
         2: "Block",
-        4: "CompactBlock"
+        4: "CompactBlock",
+        5: "XthinnerBlock"
     }
 
     def __init__(self, t=0, h=0):
@@ -730,6 +731,46 @@ class BlockTransactions():
         return "BlockTransactions(hash={:064x} transactions={})".format(
             self.blockhash, repr(self.transactions))
 
+class XthinnerBlock():
+    def __init__(self):
+        self.header = CBlockHeader()
+        self.txcount = None
+        self.segmentsize = 0
+        self.segments = []
+        # print("Created XthinnerBlock")
+
+    def deserialize(self, f):
+        self.header.deserialize(f)
+        self.txcount = deser_compact_size(f)
+        self.segments = deser_vector(f, XthinnerSegment)
+        # print("Deserialized XthinnerBlock", self.header, self.txcount, self.segmentsize, [len(seg) for seg in self.segments])
+
+    def serialize(self):
+        r = b""
+        r += self.header.serialize()
+        r += ser_compact_size(self.txcount)
+        r += ser_compact_size(len(self.segments))
+        r += b''.join(self.segments)
+        return r
+
+class XthinnerSegment():
+    def __init__(self):
+        pass
+    def deserialize(self, f):
+        self.segmentLength = deser_compact_size(f)
+        self.commandSize = deser_compact_size(f)
+        packedCommandSize = deser_compact_size(f)
+        self.packedCommands = f.read(packedCommandSize)
+        pushByteSize = deser_compact_size(f)
+        self.pushBytes = f.read(pushByteSize)
+        checkspecsize = deser_compact_size(f)
+        self.checksumSpec = [(ord(f.read(1)), ord(f.read(1))) for i in range(checkspecsize)]
+        self.checksumData = []
+        checkdatasize = deser_compact_size(f)
+        for i in range(checkdatasize):
+            n = deser_compact_size(f)
+            self.checksumData.append(f.read(n))
+        self.prefilled_txn = deser_vector(f, PrefilledTransaction)
 
 # Objects that correspond to messages on the wire
 class msg_version():
@@ -1202,3 +1243,86 @@ class msg_blocktxn():
     def __repr__(self):
         return "msg_blocktxn(block_transactions={})".format(
             repr(self.block_transactions))
+
+class msg_xtrconfig():
+    command = b"xtrconfig"
+
+    def __init__(self):
+        self.size = 13
+        self.version = 0
+        self.canSendXtr = False
+        self.canRecvXtr = False
+        self.AnnounceUnverified = True
+        self.PushXtrBlocks = False
+        self.PushMaxTxCount = 100000
+
+    def deserialize(self, f):
+        self.size = deser_compact_size(f)
+        p = 0
+        if self.size > p:
+            p += 1
+            self.version = struct.unpack("<B", f.read(1))[0]
+        if self.size > p:
+            p += 1
+            self.canSendXtr = struct.unpack("<?", f.read(1))[0]
+        if self.size > p:
+            p += 1
+            self.canRecvXtr = struct.unpack("<?", f.read(1))[0]
+        if self.size > p:
+            p += 1
+            self.AnnounceUnverified = struct.unpack("<?", f.read(1))[0]
+        if self.size > p:
+            p += 1
+            self.PushXtrBlocks = struct.unpack("<?", f.read(1))[0]
+        if self.size > p+3:
+            p += 4
+            self.PushMaxTxCount = struct.unpack("<Q", f.read(8))[0]
+
+    def serialize(self):
+        r = b""
+        r += ser_compact_size(self.size)
+        p = 0
+        if self.size > p:
+            p += 1
+            r += struct.pack("<B", self.version)
+        if self.size > p:
+            p += 1
+            r += struct.pack("<?", self.canSendXtr)
+        if self.size > p:
+            p += 1
+            r += struct.pack("<?", self.canRecvXtr)
+        if self.size > p:
+            p += 1
+            r += struct.pack("<?", self.AnnounceUnverified)
+        if self.size > p:
+            p += 1
+            r += struct.pack("<?", self.PushXtrBlocks)
+        if self.size > p+3:
+            p += 4
+            r += struct.pack("<Q", self.PushMaxTxCount)
+        return r
+    def __repr__(self):
+        return "msg_xtrconfig(size=%i, version=%i, Push=%i)" % \
+             (self.size, self.version, int(self.PushXtrBlocks))
+
+class msg_xtrblk():
+    command = b"xtrblk"
+
+    def __init__(self, xthinner_block = XthinnerBlock()):
+        self.xthinner_block = xthinner_block
+
+    def deserialize(self, f):
+        self.xthinner_block.deserialize(f)
+
+    def serialize(self):
+        return self.xthinner_block.serialize()
+
+class msg_getblocktxn():
+    command = b"getblocktxn"
+
+    def __init__(self):
+        self.block_txn_request = None
+
+    def deserialize(self, f):
+        self.block_txn_request = BlockTransactionsRequest()
+        self.block_txn_request.deserialize(f)

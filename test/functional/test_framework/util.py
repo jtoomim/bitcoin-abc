@@ -412,7 +412,7 @@ def connect_nodes_bi(a, b):
     connect_nodes(b, a)
 
 
-def sync_blocks(rpc_connections, *, wait=1, timeout=60):
+def sync_blocks(rpc_connections, *, wait=1, timeout=6):
     """
     Wait until everybody has the same tip.
 
