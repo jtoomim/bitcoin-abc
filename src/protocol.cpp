@@ -44,13 +44,20 @@ const char *SENDCMPCT = "sendcmpct";
 const char *CMPCTBLOCK = "cmpctblock";
 const char *GETBLOCKTXN = "getblocktxn";
 const char *BLOCKTXN = "blocktxn";
+const char *XTRCONFIG = "xtrconfig";
+const char *XTRBLK = "xtrblk";
+const char *XTRGETTXN = "xtrgettxn";
+const char *XTRTXN = "xtrtxn";
 const char *AVAPOLL = "avapoll";
 const char *AVARESPONSE = "avaresponse";
 
 bool IsBlockLike(const std::string &strCommand) {
     return strCommand == NetMsgType::BLOCK ||
            strCommand == NetMsgType::CMPCTBLOCK ||
-           strCommand == NetMsgType::BLOCKTXN;
+           strCommand == NetMsgType::BLOCKTXN ||
+           strCommand == NetMsgType::XTRBLK ||
+           strCommand == NetMsgType::XTRGETTXN ||
+           strCommand == NetMsgType::XTRTXN;
 }
 }; // namespace NetMsgType
 
@@ -67,7 +74,8 @@ static const std::string allNetMessageTypes[] = {
     NetMsgType::NOTFOUND,    NetMsgType::FILTERLOAD, NetMsgType::FILTERADD,
     NetMsgType::FILTERCLEAR, NetMsgType::REJECT,     NetMsgType::SENDHEADERS,
     NetMsgType::FEEFILTER,   NetMsgType::SENDCMPCT,  NetMsgType::CMPCTBLOCK,
-    NetMsgType::GETBLOCKTXN, NetMsgType::BLOCKTXN,
+    NetMsgType::GETBLOCKTXN, NetMsgType::BLOCKTXN,   NetMsgType::XTRCONFIG,
+    NetMsgType::XTRBLK,      NetMsgType::XTRGETTXN,  NetMsgType::XTRTXN,
 };
 static const std::vector<std::string>
     allNetMessageTypesVec(allNetMessageTypes,

@@ -257,6 +257,19 @@ extern const char *BLOCKTXN;
  */
 extern const char *AVAPOLL;
 /**
+ * Contains a XTROPTIONS object to configure the Xthinner family of protocols.
+ * Extensible; see xthinner.h for details.
+ */
+extern const char *XTRCONFIG;
+/**
+ * Contains a XthinnerBlock object - providing a header and
+ * one or more segments of Xthinner-encoded TXIDs.
+ * @since protocol version 70014 as described by BIP XXX
+ */
+extern const char *XTRBLK;
+extern const char *XTRGETTXN;
+extern const char *XTRTXN;
+/**
  * Contains an AvalancheResponse.
  * Sent in response to a "avapoll" message.
  */
@@ -322,7 +335,6 @@ enum ServiceFlags : uint64_t {
     // NODE_AVALANCHE means the node supports Bitcoin Cash's avalanche
     // preconsensus mechanism.
     NODE_AVALANCHE = (1 << 24),
-    NODE_XTHINNER = (1 << 27),
 };
 
 /**
@@ -419,12 +431,12 @@ enum GetDataMsg {
     UNDEFINED = 0,
     MSG_TX = 1,
     MSG_BLOCK = 2,
-    // The following can only occur in getdata. Invs always use TX or BLOCK.
+    // The following two can only occur in getdata. Invs always use TX, BLOCK, or XTR_BLOCK.
     //!< Defined in BIP37
     MSG_FILTERED_BLOCK = 3,
     //!< Defined in BIP152
     MSG_CMPCT_BLOCK = 4,
-    MSG_XTHR_BLOCK = 5,
+    MSG_XTR_BLOCK = 5,
 };
 
 /**
@@ -467,7 +479,7 @@ public:
     bool IsSomeBlock() const {
         auto k = GetKind();
         return k == MSG_BLOCK || k == MSG_FILTERED_BLOCK ||
-               k == MSG_CMPCT_BLOCK;
+               k == MSG_CMPCT_BLOCK || k == MSG_XTR_BLOCK;
     }
 };
 

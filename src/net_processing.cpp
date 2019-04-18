@@ -34,6 +34,8 @@
 #include "utilstrencodings.h"
 #include "validation.h"
 #include "validationinterface.h"
+#include "xthinner.h"
+#include <iostream>
 
 #if defined(NDEBUG)
 #error "Bitcoin cannot be compiled without assertions."
@@ -125,6 +127,10 @@ struct QueuedBlock {
     bool fValidatedHeaders;
     //!< Optional, used for CMPCTBLOCK downloads
     std::unique_ptr<PartiallyDownloadedBlock> partialBlock;
+    //!< Optional, used for Xthinner downloads
+    std::shared_ptr<XthinnerBlock> xthinnerBlock;
+    //!< Optional, used for Xthinner downloads
+    std::shared_ptr<CBlock> pblock;
 };
 std::map<uint256, std::pair<NodeId, std::list<QueuedBlock>::iterator>>
     mapBlocksInFlight GUARDED_BY(cs_main);
@@ -228,7 +234,8 @@ struct CNodeState {
      * non-witnesses in cmpctblocks/blocktxns.
      */
     bool fSupportsDesiredCmpctVersion;
-
+    //! Configuration options for Xthinner protocols
+    XthinnerConfig xtrCfg;
     /**
      * State used to enforce CHAIN_SYNC_TIMEOUT
      * Only in effect for outbound, non-manual connections,
@@ -262,7 +269,7 @@ struct CNodeState {
     int64_t m_last_block_announcement;
 
     CNodeState(CAddress addrIn, std::string addrNameIn)
-        : address(addrIn), name(addrNameIn) {
+        : address(addrIn), name(addrNameIn), xtrCfg() {
         fCurrentlyConnected = false;
         nMisbehavior = 0;
         fShouldBan = false;
@@ -409,7 +416,10 @@ MarkBlockAsInFlight(const Config &config, NodeId nodeid, const uint256 &hash,
         {hash, pindex, pindex != nullptr,
          std::unique_ptr<PartiallyDownloadedBlock>(
              pit ? new PartiallyDownloadedBlock(config, &g_mempool)
-                 : nullptr)});
+                 : nullptr),
+         nullptr,
+         nullptr,
+            });
     state->nBlocksInFlight++;
     state->nBlocksInFlightValidHeaders += it->fValidatedHeaders;
     if (state->nBlocksInFlight == 1) {
@@ -424,7 +434,6 @@ MarkBlockAsInFlight(const Config &config, NodeId nodeid, const uint256 &hash,
     itInFlight = mapBlocksInFlight
                      .insert(std::make_pair(hash, std::make_pair(nodeid, it)))
                      .first;
-
     if (pit) {
         *pit = &itInFlight->second.second;
     }
@@ -517,11 +526,15 @@ static void MaybeSetPeerAsAnnouncingHeaderAndIDs(NodeId nodeid,
                 });
             lNodesAnnouncingHeaderAndIDs.pop_front();
         }
-        connman->PushMessage(pfrom, CNetMsgMaker(pfrom->GetSendVersion())
-                                        .Make(NetMsgType::SENDCMPCT,
-                                              /*fAnnounceUsingCMPCTBLOCK=*/true,
-                                              nCMPCTBLOCKVersion));
-        lNodesAnnouncingHeaderAndIDs.push_back(pfrom->GetId());
+        if ((gArgs.GetArg("-usexthinner", 0) == 0 ||
+              State(pfrom->GetId())->xtrCfg.fCanSendXtr)) {
+            connman->PushMessage(pfrom,
+                                 CNetMsgMaker(pfrom->GetSendVersion())
+                                     .Make(NetMsgType::SENDCMPCT,
+                                           /*fAnnounceUsingCMPCTBLOCK=*/true,
+                                           nCMPCTBLOCKVersion));
+            lNodesAnnouncingHeaderAndIDs.push_back(pfrom->GetId());
+        }
         return true;
     });
 }
@@ -1396,6 +1409,26 @@ void static ProcessGetBlockData(const Config &config, CNode *pfrom,
                     pfrom,
                     msgMaker.Make(nSendFlags, NetMsgType::BLOCK, *pblock));
             }
+        } else if (gArgs.GetArg("-usexthinner", 0) &&
+                   inv.type == MSG_XTR_BLOCK) {
+            int nSendFlags = 0;
+            if (CanDirectFetch(consensusParams) &&
+                pindex->nHeight >=
+                    chainActive.Height() - MAX_CMPCTBLOCK_DEPTH) {
+                LogPrintf("Responding to MSG_XTR_BLOCK inv with xtrblk\n");
+                LOCK(g_mempool.cs);
+                XthinnerBlock xtrblock(*pblock, g_mempool);
+                connman->PushMessage(
+                    pfrom,
+                    msgMaker.Make(nSendFlags,
+                                  NetMsgType::XTRBLK,
+                                  xtrblock));
+            } else {
+                connman->PushMessage(
+                    pfrom,
+                    msgMaker.Make(nSendFlags, NetMsgType::BLOCK,
+                                  pblock));
+            }
         }
 
         // Trigger the peer node to send a getblocks request for the next batch
@@ -1469,7 +1502,8 @@ static void ProcessGetData(const Config &config, CNode *pfrom,
         const CInv &inv = *it;
         it++;
         if (inv.type == MSG_BLOCK || inv.type == MSG_FILTERED_BLOCK ||
-            inv.type == MSG_CMPCT_BLOCK) {
+            inv.type == MSG_CMPCT_BLOCK ||
+            (gArgs.GetArg("-usexthinner", 0) && inv.type == MSG_XTR_BLOCK)) {
             ProcessGetBlockData(config, pfrom, inv, connman, interruptMsgProc);
         }
     }
@@ -1506,12 +1540,37 @@ inline static void SendBlockTransactions(const CBlock &block,
         resp.txn[i] = block.vtx[req.indices[i]];
     }
     LOCK(cs_main);
+    LogPrintf("cs_main locked in SendBlockTransactions\n");
     const CNetMsgMaker msgMaker(pfrom->GetSendVersion());
     int nSendFlags = 0;
     connman->PushMessage(pfrom,
                          msgMaker.Make(nSendFlags, NetMsgType::BLOCKTXN, resp));
 }
 
+inline static void SendXthinnerTransactions(const CBlock &block,
+                                         const BlockTransactionsRequest &req,
+                                         CNode *pfrom, CConnman *connman) {
+    LogPrintf("Entering SendXthinnerTransactions\n");
+    XthinnerTransactions resp(req);
+    for (size_t i = 0; i < req.indices.size(); i++) {
+        if (req.indices[i] >= block.vtx.size()) {
+            LOCK(cs_main);
+            Misbehaving(pfrom, 100, "out-of-bound-tx-index");
+            LogPrintf(
+                "Peer %d sent us a getblocktxn with out-of-bounds tx indices",
+                pfrom->GetId());
+            return;
+        }
+        resp.txn[i].index = req.indices[i];
+        resp.txn[i].tx = block.vtx[req.indices[i]];
+    }
+    LOCK(cs_main);
+    const CNetMsgMaker msgMaker(pfrom->GetSendVersion());
+    int nSendFlags = 0;
+    LogPrintf("Sending XTRTXN with %d tx\n", resp.txn.size());
+    connman->PushMessage(pfrom,
+                         msgMaker.Make(nSendFlags, NetMsgType::XTRTXN, resp));
+}
 static bool ProcessHeadersMessage(const Config &config, CNode *pfrom,
                                   CConnman *connman,
                                   const std::vector<CBlockHeader> &headers,
@@ -2078,6 +2137,17 @@ static bool ProcessMessage(const Config &config, CNode *pfrom,
             connman->PushMessage(pfrom, msgMaker.Make(NetMsgType::SENDCMPCT,
                                                       fAnnounceUsingCMPCTBLOCK,
                                                       nCMPCTBLOCKVersion));
+            if (gArgs.GetArg("-usexthinner", 0)) {
+                // Tell our peer we are willing to do Xthinner, too.
+                XthinnerConfig ourXtrCfg;
+                ourXtrCfg.nXtrVersion = XTR_VERSION;
+                ourXtrCfg.fCanSendXtr = true;
+                ourXtrCfg.fCanRecvXtr = true;
+                ourXtrCfg.fAnnounceUnverified = true;
+                ourXtrCfg.fPushXtrBlocks = true;
+                connman->PushMessage(pfrom, msgMaker.Make(NetMsgType::XTRCONFIG,
+                                                          ourXtrCfg));
+            }
         }
         pfrom->fSuccessfullyConnected = true;
     }
@@ -2170,6 +2240,18 @@ static bool ProcessMessage(const Config &config, CNode *pfrom,
             }
         }
     }
+    else if (gArgs.GetArg("-usexthinner", 0) && strCommand == NetMsgType::XTRCONFIG) {
+        LOCK(cs_main);
+        vRecv >> State(pfrom->GetId())->xtrCfg;
+
+        if (State(pfrom->GetId())->xtrCfg.nXtrVersion != XTR_VERSION) {
+            State(pfrom->GetId())->xtrCfg.fCanRecvXtr = false;
+            State(pfrom->GetId())->xtrCfg.fCanSendXtr = false;
+            State(pfrom->GetId())->xtrCfg.fAnnounceUnverified = false;
+            State(pfrom->GetId())->xtrCfg.fPushXtrBlocks= false;
+        }
+    }
+
 
     else if (strCommand == NetMsgType::INV) {
         std::vector<CInv> vInv;
@@ -2337,7 +2419,8 @@ static bool ProcessMessage(const Config &config, CNode *pfrom,
         }
     }
 
-    else if (strCommand == NetMsgType::GETBLOCKTXN) {
+    else if (strCommand == NetMsgType::GETBLOCKTXN ||
+        (gArgs.GetArg("-usexthinner", 0) && strCommand == NetMsgType::XTRGETTXN)) {
         BlockTransactionsRequest req;
         vRecv >> req;
 
@@ -2350,7 +2433,11 @@ static bool ProcessMessage(const Config &config, CNode *pfrom,
             // Unlock cs_most_recent_block to avoid cs_main lock inversion
         }
         if (recent_block) {
-            SendBlockTransactions(*recent_block, req, pfrom, connman);
+            if (strCommand == NetMsgType::GETBLOCKTXN) {
+                SendBlockTransactions(*recent_block, req, pfrom, connman);
+            } else {
+                SendXthinnerTransactions(*recent_block, req, pfrom, connman);
+            }
             return true;
         }
 
@@ -2388,7 +2475,11 @@ static bool ProcessMessage(const Config &config, CNode *pfrom,
         bool ret = ReadBlockFromDisk(block, pindex, config);
         assert(ret);
 
-        SendBlockTransactions(block, req, pfrom, connman);
+        if (strCommand == NetMsgType::GETBLOCKTXN) {
+            SendBlockTransactions(*recent_block, req, pfrom, connman);
+        } else {
+            SendXthinnerTransactions(*recent_block, req, pfrom, connman);
+        }
     }
 
     else if (strCommand == NetMsgType::GETHEADERS) {
@@ -2949,6 +3040,265 @@ static bool ProcessMessage(const Config &config, CNode *pfrom,
 
     }
 
+    else if (gArgs.GetArg("-usexthinner", 0) &&
+             strCommand == NetMsgType::XTRBLK && !fImporting && !fReindex) {
+        std::shared_ptr<XthinnerBlock> xtrblock =
+            std::make_shared<XthinnerBlock>();
+        vRecv >> *xtrblock;
+
+        bool received_new_header = false;
+        {
+            LOCK(cs_main);
+            if (mapBlockIndex.find(xtrblock->header.hashPrevBlock) ==
+                mapBlockIndex.end()) {
+                // Doesn't connect (or is genesis), instead of DoSing in
+                // AcceptBlockHeader, request deeper headers
+                if (!IsInitialBlockDownload()) {
+                    connman->PushMessage(pfrom,
+                        msgMaker.Make(NetMsgType::GETHEADERS,
+                                      chainActive.GetLocator(pindexBestHeader),
+                                      uint256()));
+                }
+                return true;
+            }
+
+            if (mapBlockIndex.find(xtrblock->header.GetHash()) ==
+                mapBlockIndex.end()) {
+                received_new_header = true;
+            }
+        }
+
+        const CBlockIndex *pindex = nullptr;
+        CValidationState state;
+        if (!ProcessNewBlockHeaders(config, {xtrblock->header}, state,
+                                    &pindex)) {
+            int nDoS;
+            if (state.IsInvalid(nDoS)) {
+                if (nDoS > 0) {
+                    LOCK(cs_main);
+                    Misbehaving(pfrom, nDoS, state.GetRejectReason());
+                }
+                LogPrintf("Peer %d sent us invalid header via xtrblock\n",
+                          pfrom->GetId());
+                return true;
+            }
+        }
+
+        // When we succeed in decoding a block's txids from a xtrblock
+        // message we typically jump to the BLOCKTXN handling code, with a
+        // dummy (empty) BLOCKTXN message, to re-use the logic there in
+        // completing processing of the putative block (without cs_main).
+        CDataStream blockTxnMsg(SER_NETWORK, PROTOCOL_VERSION);
+
+        // If we end up treating this as a plain headers message, call that as
+        // well
+        // without cs_main.
+        bool fRevertToHeaderProcessing = false;
+
+        // Keep a CBlock for "optimistic" compactblock reconstructions (see
+        // below)
+        std::shared_ptr<CBlock> pblock = std::make_shared<CBlock>();
+        bool fBlockReconstructed = false;
+
+        {
+            LOCK(cs_main);
+            // If AcceptBlockHeader returned true, it set pindex
+            assert(pindex);
+            UpdateBlockAvailability(pfrom->GetId(), pindex->GetBlockHash());
+
+            CNodeState *nodestate = State(pfrom->GetId());
+
+            // If this was a new header with more work than our tip, update the
+            // peer's last block announcement time
+            if (received_new_header &&
+                pindex->nChainWork > chainActive.Tip()->nChainWork) {
+                nodestate->m_last_block_announcement = GetTime();
+            }
+
+            std::map<uint256,
+                     std::pair<NodeId, std::list<QueuedBlock>::iterator>>::
+                iterator blockInFlightIt =
+                    mapBlocksInFlight.find(pindex->GetBlockHash());
+            bool fAlreadyInFlight = blockInFlightIt != mapBlocksInFlight.end();
+
+            if (pindex->nStatus.hasData()) {
+                // Nothing to do here
+                return true;
+            }
+
+            if (pindex->nChainWork <= chainActive.Tip()->nChainWork ||
+                pindex->nTx != 0) {
+                // We had this block at some point, but pruned it
+                if (fAlreadyInFlight) {
+                    // We requested this block for some reason, but our mempool
+                    // will probably be useless so we just grab the block via
+                    // normal getdata.
+                    std::vector<CInv> vInv(1);
+                    vInv[0] = CInv(MSG_BLOCK, xtrblock->header.GetHash());
+                    connman->PushMessage(
+                        pfrom, msgMaker.Make(NetMsgType::GETDATA, vInv));
+                }
+                return true;
+            }
+
+            // If we're not close to tip yet, give up and let parallel block
+            // fetch work its magic.
+            if (!fAlreadyInFlight &&
+                !CanDirectFetch(chainparams.GetConsensus())) {
+                return true;
+            }
+
+            // We want to be a bit conservative just to be extra careful about
+            // DoS possibilities in xthinner processing...
+            if (pindex->nHeight <= chainActive.Height() + 2) {
+                if ((!fAlreadyInFlight &&
+                     nodestate->nBlocksInFlight <
+                         MAX_BLOCKS_IN_TRANSIT_PER_PEER) ||
+                    (fAlreadyInFlight &&
+                     blockInFlightIt->second.first == pfrom->GetId())) {
+                    std::list<QueuedBlock>::iterator *queuedBlockIt = nullptr;
+                    bool alreadyHave = MarkBlockAsInFlight(config, pfrom->GetId(),
+                                             pindex->GetBlockHash(),
+                                             chainparams.GetConsensus(), pindex,
+                                             &queuedBlockIt);
+                    if (!(*queuedBlockIt)->xthinnerBlock ||
+                        !(*queuedBlockIt)->pblock) {
+                        (*queuedBlockIt)->xthinnerBlock = xtrblock;
+                        (*queuedBlockIt)->pblock = pblock;
+                    } else if (alreadyHave) {
+                        // The block was already in flight using compact
+                        // blocks from the same peer.
+                        LogPrint(BCLog::NET, "Peer sent us xtrblk "
+                                             "we were already syncing!\n");
+                        return true;
+                    }
+                    int status;
+                    {
+                        LOCK(g_mempool.cs);
+                        status = xtrblock->FillBlock(*pblock, g_mempool);
+                    }
+                    // all non-zero statuses are different encoding errors
+                    if (status) {
+                        // Reset in-flight state in case of whitelist
+                        MarkBlockAsReceived(pindex->GetBlockHash());
+                        Misbehaving(pfrom, 100, "invalid-xtrblk");
+                        LogPrintf("Peer %d sent us invalid xthinner block\n",
+                                  pfrom->GetId());
+                        return true;
+                    }
+                    LogPrintf("xtrblk: %d tx\n", xtrblock->size());
+                    if (xtrblock->CountMissing()) {
+                        LogPrintf("Xthinner block had %d missing transactions of %d total.\n",
+                                  xtrblock->CountMissing(), xtrblock->size());
+                        std::vector<std::vector<uint32_t> > vvMissing;
+                        xtrblock->GetMissing(vvMissing);
+                        for (uint32_t i=0; i<vvMissing.size(); i++) {
+                            if (vvMissing[i].size()) {
+                                BlockTransactionsRequest req;
+                                req.blockhash = xtrblock->header.GetHash();
+                                for (uint32_t j=0; j<vvMissing[i].size(); j++) {
+                                    req.indices.push_back(vvMissing[i][j]);
+                                }
+                                connman->PushMessage(pfrom, msgMaker.Make(NetMsgType::XTRGETTXN, req));
+                            }
+                        }
+                    } else {
+                        LogPrintf("Received complete xthinner block: %s.\n",
+                                  xtrblock->header.GetHash().GetHex());
+                        fBlockReconstructed = true;
+                    }
+                } else {
+                    // Is this really necessary or useful? It would be rather rare
+                    // for a collision to happen only on one peer connection
+                    LogPrintf("Fixme?: non-implemented code path reached (xtrblk received from two peers)\n");
+                    /*
+                    // This block is either already in flight from a different
+                    // peer, or this peer has too many blocks outstanding to
+                    // download from. Optimistically try to reconstruct anyway
+                    // since we might be able to without any round trips.
+
+                    // fixme: implement this in a fashion that doesn't suck
+
+                    PartiallyDownloadedBlock tempBlock(config, &g_mempool);
+                    ReadStatus status =
+                        tempBlock.InitData(xtrblock, vExtraTxnForCompact);
+                    if (status != READ_STATUS_OK) {
+                        // TODO: don't ignore failures
+                        return true;
+                    }
+                    std::vector<CTransactionRef> dummy;
+                    status = tempBlock.FillBlock(*pblock, dummy);
+                    if (status == READ_STATUS_OK) {
+                        fBlockReconstructed = true;
+                    }
+                    */
+                }
+            } else {
+                if (fAlreadyInFlight) {
+                    // We requested this block, but its far into the future, so
+                    // our mempool will probably be useless - request the block
+                    // normally.
+                    std::vector<CInv> vInv(1);
+                    vInv[0] = CInv(MSG_BLOCK, xtrblock->header.GetHash());
+                    connman->PushMessage(
+                        pfrom, msgMaker.Make(NetMsgType::GETDATA, vInv));
+                    return true;
+                } else {
+                    // If this was an announce-xtrblock, we want the same
+                    // treatment as a header message.
+                    fRevertToHeaderProcessing = true;
+                }
+            }
+        } // cs_main
+
+        if (fRevertToHeaderProcessing) {
+            // Headers received from HB compact block peers are permitted to be
+            // relayed before full validation (see BIP 152), so we don't want to
+            // disconnect the peer if the header turns out to be for an invalid
+            // block.
+            // Note that if a peer tries to build on an invalid chain, that will
+            // be detected and the peer will be banned.
+            return ProcessHeadersMessage(config, pfrom, connman,
+                                         {xtrblock->header},
+                                         /*punish_duplicate_invalid=*/false);
+        }
+
+        if (fBlockReconstructed) {
+            // If we got here, we were able to optimistically reconstruct a
+            // block that is in flight from some other peer.
+            {
+                LOCK(cs_main);
+                mapBlockSource.emplace(pblock->GetHash(),
+                                       std::make_pair(pfrom->GetId(), false));
+            }
+            bool fNewBlock = false;
+            // Setting fForceProcessing to true means that we bypass some of
+            // our anti-DoS protections in AcceptBlock, which filters
+            // unrequested blocks that might be trying to waste our resources
+            // (eg disk space). Because we only try to reconstruct blocks when
+            // we're close to caught up (via the CanDirectFetch() requirement
+            // above, combined with the behavior of not requesting blocks until
+            // we have a chain with at least nMinimumChainWork), and we ignore
+            // compact blocks with less work than our tip, it is safe to treat
+            // reconstructed compact blocks as having been requested.
+            ProcessNewBlock(config, pblock, /*fForceProcessing=*/true,
+                            &fNewBlock);
+            if (fNewBlock) {
+                pfrom->nLastBlockTime = GetTime();
+            }
+
+            // hold cs_main for CBlockIndex::IsValid()
+            LOCK(cs_main);
+            if (pindex->IsValid(BlockValidity::TRANSACTIONS)) {
+                // Clear download state for this block, which is in process from
+                // some other peer. We do this after calling. ProcessNewBlock so
+                // that a malleated xtrblk announcement can't be used to
+                // interfere with block relay.
+                MarkBlockAsReceived(pblock->GetHash());
+            }
+        }
+    }
+
     else if (strCommand == NetMsgType::BLOCKTXN && !fImporting &&
              !fReindex) // Ignore blocks received while importing
     {
@@ -2967,9 +3317,10 @@ static bool ProcessMessage(const Config &config, CNode *pfrom,
                 !it->second.second->partialBlock ||
                 it->second.first != pfrom->GetId()) {
                 LogPrint(BCLog::NET,
-                         "Peer %d sent us block transactions for block "
+                         "Peer %d sent us block transactions for block %s "
                          "we weren't expecting\n",
-                         pfrom->GetId());
+                         pfrom->GetId(),
+                         resp.blockhash.ToString());
                 return true;
             }
 
@@ -3021,6 +3372,100 @@ static bool ProcessMessage(const Config &config, CNode *pfrom,
                                        std::make_pair(pfrom->GetId(), false));
             }
         } // Don't hold cs_main when we call into ProcessNewBlock
+        if (fBlockRead) {
+            bool fNewBlock = false;
+            // Since we requested this block (it was in mapBlocksInFlight),
+            // force it to be processed, even if it would not be a candidate for
+            // new tip (missing previous block, chain not long enough, etc)
+            // This bypasses some anti-DoS logic in AcceptBlock (eg to prevent
+            // disk-space attacks), but this should be safe due to the
+            // protections in the compact block handler -- see related comment
+            // in compact block optimistic reconstruction handling.
+            ProcessNewBlock(config, pblock, /*fForceProcessing=*/true,
+                            &fNewBlock);
+            if (fNewBlock) {
+                pfrom->nLastBlockTime = GetTime();
+            }
+        }
+    }
+
+    else if (gArgs.GetArg("-usexthinner", 0) &&
+             strCommand == NetMsgType::XTRTXN && !fImporting && !fReindex) {
+        XthinnerTransactions resp; // fixme: this isn't what we're getting
+        vRecv >> resp;
+
+        std::shared_ptr<CBlock> pblock;
+        std::shared_ptr<XthinnerBlock> xtrblock;
+        bool fBlockRead = false;
+        {
+            LOCK(cs_main);
+
+            std::map<uint256,
+                     std::pair<NodeId, std::list<QueuedBlock>::iterator>>::
+                iterator it = mapBlocksInFlight.find(resp.blockhash);
+            if (it == mapBlocksInFlight.end() ||
+                !it->second.second->xthinnerBlock ||
+                !it->second.second->pblock ||
+                it->second.first != pfrom->GetId()) {
+                LogPrint(BCLog::NET,
+                         "Peer %d sent us xtr block transactions for block %s "
+                         "we weren't expecting 2.0\n",
+                         pfrom->GetId(),
+                         resp.blockhash.ToString());
+                LogPrintf("it==end: %i\nit->2nd.2nd->pB: %i\npfrom: %i\n",
+                    it == mapBlocksInFlight.end(),
+                    !it->second.second->partialBlock,
+                    it->second.first);
+                return true;
+            }
+
+            pblock = it->second.second->pblock;
+            xtrblock = it->second.second->xthinnerBlock;
+        }
+        int status = xtrblock->Update(*pblock, resp.txn);
+        if (status) {
+            LOCK(cs_main);
+            // Reset in-flight state in case of whitelist.
+            // MarkBlockAsReceived(resp.blockhash); // fixme: check for cs_main conflicts
+            Misbehaving(pfrom, 100, "invalid-xtrblk-txns");
+            LogPrintf("Peer %d sent us invalid xthinner block/non-matching "
+                      "block transactions. Error code: %d\n",
+                      pfrom->GetId(),
+                      status);
+            std::cout << "Error code:" << status << "\n";
+
+            return true;
+        } else {
+            LOCK(cs_main);
+            // Block is either okay, or possibly we received
+            // READ_STATUS_CHECKBLOCK_FAILED.
+            // Note that CheckBlock can only fail for one of a few reasons:
+            // 1. bad-proof-of-work (impossible here, because we've already
+            //    accepted the header)
+            // 2. merkleroot doesn't match the transactions given (already
+            //    caught in FillBlock with READ_STATUS_FAILED, so
+            //    impossible here)
+            // 3. the block is otherwise invalid (eg invalid coinbase,
+            //    block is too big, too many legacy sigops, etc).
+            // So if CheckBlock failed, #3 is the only possibility.
+            // Under BIP 152, we don't DoS-ban unless proof of work is
+            // invalid (we don't require all the stateless checks to have
+            // been run). This is handled below, so just treat this as
+            // though the block was successfully read, and rely on the
+            // handling in ProcessNewBlock to ensure the block index is
+            // updated, reject messages go out, etc.
+
+            // it is now an empty pointer
+            MarkBlockAsReceived(resp.blockhash);
+            fBlockRead = true;
+            // mapBlockSource is only used for sending reject messages and
+            // DoS scores, so the race between here and cs_main in
+            // ProcessNewBlock is fine. BIP 152 permits peers to relay
+            // compact blocks after validating the header only; we should
+            // not punish peers if the block turns out to be invalid.
+            mapBlockSource.emplace(resp.blockhash,
+                                   std::make_pair(pfrom->GetId(), false));
+        }
         if (fBlockRead) {
             bool fNewBlock = false;
             // Since we requested this block (it was in mapBlocksInFlight),
@@ -3860,7 +4305,8 @@ bool PeerLogicValidation::SendMessages(const Config &config, CNode *pto,
         std::vector<CBlock> vHeaders;
         bool fRevertToInv =
             ((!state.fPreferHeaders &&
-              (!state.fPreferHeaderAndIDs ||
+              ((!state.fPreferHeaderAndIDs &&
+                !state.xtrCfg.fCanRecvXtr) ||
                pto->vBlockHashesToAnnounce.size() > 1)) ||
              pto->vBlockHashesToAnnounce.size() > MAX_BLOCKS_TO_ANNOUNCE);
         // last header queued for delivery
@@ -3917,10 +4363,41 @@ bool PeerLogicValidation::SendMessages(const Config &config, CNode *pto,
             }
         }
         if (!fRevertToInv && !vHeaders.empty()) {
-            if (vHeaders.size() == 1 && state.fPreferHeaderAndIDs) {
-                // We only send up to 1 block as header-and-ids, as otherwise
+
+            if (gArgs.GetArg("-usexthinner", 0) &&
+                vHeaders.size() == 1 && state.xtrCfg.fPushXtrBlocks) {
+                // We only send up to 1 block as Xthinner, as otherwise
                 // probably means we're doing an initial-ish-sync or they're
                 // slow.
+                LogPrint(BCLog::NET,
+                         "%s pushing XthinnerBlock %s to peer=%d\n", __func__,
+                         vHeaders.front().GetHash().ToString(), pto->GetId());
+
+                bool fGotBlockFromCache = false;
+                {
+                    // fixme: cache XthinnerBlock object
+                    LogPrintf("Pushing xtrblk with mempool size %d\n", g_mempool.size());
+                    LOCK(cs_most_recent_block);
+                    if (most_recent_block_hash == pBestIndex->GetBlockHash()) {
+                        LOCK(g_mempool.cs);
+                        XthinnerBlock xtrblock(*most_recent_block, g_mempool);
+                        connman->PushMessage(pto,
+                            msgMaker.Make(NetMsgType::XTRBLK, xtrblock));
+                        fGotBlockFromCache = true;
+                    }
+                }
+                if (!fGotBlockFromCache) {
+                    CBlock block;
+                    bool ret = ReadBlockFromDisk(block, pBestIndex, config);
+                    assert(ret);
+                    XthinnerBlock xtrblock(*most_recent_block, g_mempool);
+                    connman->PushMessage(pto,
+                        msgMaker.Make(NetMsgType::XTRBLK, xtrblock));
+                }
+                state.pindexBestHeaderSent = pBestIndex;
+
+            } else if (vHeaders.size() == 1 && state.fPreferHeaderAndIDs) {
+                // Same as above but for Compact Blocks
                 LogPrint(BCLog::NET,
                          "%s sending header-and-ids %s to peer=%d\n", __func__,
                          vHeaders.front().GetHash().ToString(), pto->GetId());
