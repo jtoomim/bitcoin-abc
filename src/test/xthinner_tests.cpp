@@ -121,14 +121,13 @@ BOOST_AUTO_TEST_CASE(SimpleRoundTripTest) {
         //new_tx.vout[0].scriptPubKey = p2pk_scriptPubKey;
         new_tx.vin[0].prevout = COutPoint(InsecureRand256(), 0);
 
-        if (i < tx_count)
+
+        if (i<tx_count/2)
+            vTx.push_back(new_tx);
+        else if (i < tx_count)
             pool.addUnchecked(new_tx.GetId(), entry.FromTx(new_tx));
         if (i >= recipientMissingTx)
             pool2.addUnchecked(new_tx.GetId(), entry.FromTx(new_tx));
-
-        if (i<tx_count/2) {
-            vTx.push_back(new_tx);
-        }
     }
     for (auto tx : vTx) {
         CTransaction out_tx(tx);
