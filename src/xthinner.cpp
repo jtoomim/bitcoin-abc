@@ -82,7 +82,9 @@ int XthinnerSegment::FromTXIDs(const std::vector<CTransactionRef> &vtx, const CT
         }
         std::cout << "\n";
     }
-
+    LogPrintf("Encoding an Xthinner block with %d transactions with mempool size %d\n",
+        vtx.size(), pool.mapTx.size());
+    std::cout << "Encoding an Xthinner block with "<< vtx.size() << " transactions with mempool size " << pool.mapTx.size() << "\n";
     it = pool.mapTx.get<txid_score>().begin();
     //it = pool.mapTx.get<txid_score>().find(*pool.mapTx.find(vtx[start]));
 
@@ -92,11 +94,11 @@ int XthinnerSegment::FromTXIDs(const std::vector<CTransactionRef> &vtx, const CT
         TxId txid = vtx[0]->GetId();
         commands.push_back(0); // pop nothing extra
         commands.push_back(0); // only push one byte onto the stack
-        pushBytes.push_back(*(txid.end() - stack.size()-1));
-        stack.push_back(*(txid.end() - stack.size()-1));
+        pushBytes.push_back(txid.end()[-stack.size()-1]);
+        stack.push_back(txid.end()[-stack.size()-1]);
         // Compute checksums
         for (uint32_t i=0; i<checksumSpec.size(); i++) {
-            checkInFlight[i] ^= *(txid.end() - checksumSpec[i].first -1);
+            checkInFlight[i] ^= txid.end()[-checksumSpec[i].first-1];
             if (length == 1) {
                     checksumData[i].push_back(checkInFlight[i]);
                     checkInFlight[i] = 0;
@@ -133,7 +135,7 @@ int XthinnerSegment::FromTXIDs(const std::vector<CTransactionRef> &vtx, const CT
         while (stack.size() && !matched) {
             matched = true;
             for (int i=stack.size()-1; i > -1 && matched; i--) {
-                if (stack[i] != *(txid.end() - i - 1)) {
+                if (stack[i] != txid.end()[-i-1]) {
                     matched = false;
                     commands.push_back(1);
                     stack.pop_back();
@@ -149,13 +151,13 @@ int XthinnerSegment::FromTXIDs(const std::vector<CTransactionRef> &vtx, const CT
         // neighboring mempool transactions
 
         // 2(b) First push is a freebie
-        pushBytes.push_back(*(txid.end() - stack.size()-1));
-        stack.push_back(*(txid.end() - stack.size()-1));
+        pushBytes.push_back(txid.end()[-stack.size()-1]);
+        stack.push_back(txid.end()[-stack.size()-1]);
         if (debug>6) {
             sprintf(psz, "%02x", (stack.back()));
             std::cout << " freepushed " << psz << " onto stack\n";
             std::cout << "stack size is " << stack.size();
-            sprintf(psz, "%02x", (*(txid.end() - stack.size())));
+            sprintf(psz, "%02x", txid.end()[-stack.size()]);
             std::cout << " and last txid byte is " << psz << "\n";
             std::cout << preit->GetTx().GetId().GetHex() << " is pre tx\n";
             std::cout << txid.GetHex() << " is crnt tx, stack is ";
@@ -166,7 +168,7 @@ int XthinnerSegment::FromTXIDs(const std::vector<CTransactionRef> &vtx, const CT
             }
         }
 
-        // 2(b) Find where the txid should be in mempool
+        // 2(b) Find where the txid should be in mempool (upper bound)
         while (it != pool.mapTx.get<txid_score>().end()
                && it->GetTx().GetId() < txid) {
             it++;
@@ -182,10 +184,8 @@ int XthinnerSegment::FromTXIDs(const std::vector<CTransactionRef> &vtx, const CT
         bool leftmatched = false;
         if (it != pool.mapTx.get<txid_score>().begin()) {
             preit--;
-            if (preit != pool.mapTx.get<txid_score>().begin()) {
-                pretxid = preit->GetTx().GetId();
-                leftmatched = true; // previous mempool tx exists
-            }
+            pretxid = preit->GetTx().GetId();
+            leftmatched = true; // previous mempool tx exists
         }
         if (bPos > 1 && vtx[bPos-1]->GetId() > pretxid) {
             pretxid = vtx[bPos-1]->GetId();
@@ -195,14 +195,15 @@ int XthinnerSegment::FromTXIDs(const std::vector<CTransactionRef> &vtx, const CT
         TxId posttxid = lasttxid; // 0xffff...
         postit = it;
         bool rightmatched = false;
-        if (it != pool.mapTx.get<txid_score>().end()) {
+        if (postit != pool.mapTx.get<txid_score>().end() &&
+            postit->GetTx().GetId() == txid) {
             postit++;
-            if (postit != pool.mapTx.get<txid_score>().end()) {
-                posttxid = postit->GetTx().GetId();
-                rightmatched = true; // next mempool tx exists
-            }
         }
-        if (bPos < vtx.size()-1 && vtx[bPos+1]->GetId() < posttxid) {
+        if (postit != pool.mapTx.get<txid_score>().end()) {
+            posttxid = postit->GetTx().GetId();
+            rightmatched = true; // next mempool tx exists
+        }
+        if (bPos+1 < vtx.size() && vtx[bPos+1]->GetId() < posttxid) {
             posttxid = vtx[bPos+1]->GetId();
             rightmatched = true; // next block tx exists and is more similar
         }
@@ -287,6 +288,7 @@ int XthinnerSegment::ToTXIDs(std::vector<CTransactionRef> &vtx, const CTxMemPool
 
     uint32_t nMissing = 0;
     uint32_t nAmbiguous = 0;
+    uint32_t nChecksum = 0;
 
     if (vtx.size() < start + segmentLength) {
         std::cout << "Output vector is not big enough for Xthinner unpacking\n";
@@ -297,7 +299,7 @@ int XthinnerSegment::ToTXIDs(std::vector<CTransactionRef> &vtx, const CTxMemPool
     std::vector<uint8_t> stack; // big endian order, unlike txids
     TxId stackTxId;
     
-    char psz[9]; // for hex-formatting debugging output
+    char psz[65]; // for hex-formatting debugging output
     if (debug>5) {
         std::cout << "pushBytes is:\n";
         for (uint32_t i=0; i<pushBytes.size(); i++) {
@@ -458,8 +460,11 @@ int XthinnerSegment::ToTXIDs(std::vector<CTransactionRef> &vtx, const CTxMemPool
                 sm_missing.lock();
                 vMissing.push_back(pos);
                 sm_missing.unlock();
-                if (debug > 3) std::cout << "Transaction ambiguous! Pos " << pos << " stack " << stackTxId.GetHex() << " matches "
+                if (debug > 1) std::cout << "Transaction ambiguous! Pos " << pos << " stack " << stackTxId.GetHex() << " matches "
                           << it->GetTx().GetId().GetHex() << " and " << postit->GetTx().GetId().GetHex() << "\n";
+                LogPrintf("Transaction ambiguous! Pos %d stack %s matches %s and %s\n",
+                          pos, stackTxId.GetHex(), it->GetTx().GetId().GetHex(),
+                          postit->GetTx().GetId().GetHex());
                 nAmbiguous++;
                 for (uint32_t i=0; i<checksumSpec.size(); i++) {expectError[i]=true;}
             }
@@ -467,20 +472,22 @@ int XthinnerSegment::ToTXIDs(std::vector<CTransactionRef> &vtx, const CTxMemPool
 
         // 4. Check checksum bytes
         for (uint32_t i=0; i<checksumSpec.size(); i++) {
+            uint32_t span = (1<<checksumSpec[i].second);
             if (match && !nextmatch) {
                 checkInFlight[i] ^= *(vtx[pos]->GetId().end() - checksumSpec[i].first -1);
             }
-            if ((pos+1) % (1<<checksumSpec[i].second) == 0 || pos == start+segmentLength-1) {
-                int j = pos / (1<<checksumSpec[i].second);
+            if ((pos+1) % span == 0 || pos == start+segmentLength-1) {
+                int j = pos / span;
                 if (checksumData[i][j] != checkInFlight[i] && !expectError[i]) {
-                    if (debug>3) std::cout << "Checksum error at pos " << pos << " interval " << (1<<checksumSpec[i].second) << "\n";
+                    nChecksum++;
+                    if (debug>3) std::cout << "Checksum error at pos " << pos << " interval " << span << "\n";
                     // Need to add all of the tx covered by this checksum to vMissing, but
                     // we want to eliminate redundancies
                     sm_missing.lock();
-                    while (vMissing.size() && vMissing.back() >= pos-(1<<checksumSpec[i].second)+1) {
+                    while (vMissing.size() && vMissing.back() >= pos-span+1) {
                         vMissing.pop_back();
                     }
-                    for (uint32_t k=pos-(1<<checksumSpec[i].second)+1; k<pos+1; k++) {
+                    for (uint32_t k=pos-span+1; k<pos+1; k++) {
                         vMissing.push_back(k);
                     }
                     sm_missing.unlock();
@@ -492,6 +499,8 @@ int XthinnerSegment::ToTXIDs(std::vector<CTransactionRef> &vtx, const CTxMemPool
         }
     }
     if (debug > 2) std::cout << "Found " << nAmbiguous << " ambiguities and " << nMissing << " missing tx during first pass decode\n";
+    LogPrintf("Found %d ambiguities, %d missing, and %d checksum errors in Xthinner decode\n",
+              nAmbiguous, nMissing, nChecksum);
     return 0;
 }
 int XthinnerSegment::Update(std::vector<CTransactionRef> &vtx, const std::vector<PrefilledTransaction> &extra, uint32_t start) {
