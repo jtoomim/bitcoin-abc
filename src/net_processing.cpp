@@ -529,7 +529,7 @@ static void MaybeSetPeerAsAnnouncingHeaderAndIDs(NodeId nodeid,
             lNodesAnnouncingHeaderAndIDs.pop_front();
         }
         if ((gArgs.GetArg("-usexthinner", 0) == 0 ||
-              State(pfrom->GetId())->xtrCfg.fCanSendXtr)) {
+              !State(pfrom->GetId())->xtrCfg.fCanSendXtr)) {
             connman->PushMessage(pfrom,
                                  CNetMsgMaker(pfrom->GetSendVersion())
                                      .Make(NetMsgType::SENDCMPCT,
@@ -1553,7 +1553,6 @@ inline static void SendBlockTransactions(const CBlock &block,
 inline static void SendXthinnerTransactions(const CBlock &block,
                                          const BlockTransactionsRequest &req,
                                          CNode *pfrom, CConnman *connman) {
-    LogPrintf("Entering SendXthinnerTransactions\n");
     XthinnerTransactions resp(req);
     for (size_t i = 0; i < req.indices.size(); i++) {
         if (req.indices[i] >= block.vtx.size()) {
