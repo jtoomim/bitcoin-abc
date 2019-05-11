@@ -430,14 +430,12 @@ static CTransactionRef SendMoney(CWallet *const pwallet,
                                  const CTxDestination &address, Amount nValue,
                                  bool fSubtractFeeFromAmount,
                                  mapValue_t mapValue, std::string fromAccount) {
-    Amount curBalance = pwallet->GetBalance();
-
     // Check amount
     if (nValue <= Amount::zero()) {
         throw JSONRPCError(RPC_INVALID_PARAMETER, "Invalid amount");
     }
 
-    if (nValue > curBalance) {
+    if (!pwallet->CheckBalance(nValue)) {
         throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, "Insufficient funds");
     }
 
@@ -463,7 +461,8 @@ static CTransactionRef SendMoney(CWallet *const pwallet,
     CTransactionRef tx;
     if (!pwallet->CreateTransaction(vecSend, tx, reservekey, nFeeRequired,
                                     nChangePosRet, strError, coinControl)) {
-        if (!fSubtractFeeFromAmount && nValue + nFeeRequired > curBalance) {
+        if (!fSubtractFeeFromAmount &&
+            !pwallet->CheckBalance(nValue + nFeeRequired)) {
             strError = strprintf("Error: This transaction requires a "
                                  "transaction fee of at least %s",
                                  FormatMoney(nFeeRequired));

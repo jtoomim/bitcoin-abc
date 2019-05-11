@@ -1001,6 +1001,7 @@ public:
     std::vector<uint256> ResendWalletTransactionsBefore(int64_t nTime,
                                                         CConnman *connman);
     Amount GetBalance() const;
+    bool CheckBalance(Amount toSpend) const;
     Amount GetUnconfirmedBalance() const;
     Amount GetImmatureBalance() const;
     Amount GetWatchOnlyBalance() const;

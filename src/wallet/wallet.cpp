@@ -2191,6 +2191,22 @@ Amount CWallet::GetBalance() const {
     return nTotal;
 }
 
+bool CWallet::CheckBalance(Amount toSpend) const {
+    LOCK2(cs_main, cs_wallet);
+
+    Amount nTotal = Amount::zero();
+    for (const auto &entry : mapWallet) {
+        const CWalletTx *pcoin = &entry.second;
+        if (pcoin->IsTrusted()) {
+            nTotal += pcoin->GetAvailableCredit();
+            if (nTotal >= toSpend) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 Amount CWallet::GetUnconfirmedBalance() const {
     LOCK2(cs_main, cs_wallet);
 

@@ -93,6 +93,26 @@ class WalletTest(BitcoinTestFramework):
         assert(memory_before['locked']['used'] +
                64 <= memory_after['locked']['used'])
 
+        self.log.info("test sendtoaddress CheckBalance")
+        # Check that sendtoaddress fails with insufficient funds when you
+        # try to send more money than the wallet has
+        assert_equal(self.nodes[1].getbalance(), 50)
+        assert_raises_rpc_error(-6, "Insufficient funds",
+                                self.nodes[1].sendtoaddress,
+                                self.nodes[0].getnewaddress(),
+                                50.00000001)
+        # # Check that sendtoaddress fails with insufficient fee when you
+        # # try to send more money than the wallet has
+        assert_equal(self.nodes[1].getbalance(), 50)
+        assert_raises_rpc_error(-4, "This transaction requires a transaction fee"
+                                " of at least",
+                                self.nodes[1].sendtoaddress,
+                                self.nodes[0].getnewaddress(),
+                                50.00000000)
+        assert_equal(self.nodes[1].getbalance(), 50)
+        self.nodes[1].sendtoaddress(self.nodes[1].getnewaddress(), 49.99999800)
+        assert self.nodes[1].getbalance() < 50
+
         self.log.info("test gettxout (second part)")
         # utxo spent in mempool should be visible if you exclude mempool
         # but invisible if you include mempool
