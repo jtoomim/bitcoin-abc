@@ -143,7 +143,7 @@ static const unsigned int AVG_ADDRESS_BROADCAST_INTERVAL = 30;
  * Blocks and whitelisted receivers bypass this, outbound peers get half this
  * delay.
  */
-static const unsigned int INVENTORY_BROADCAST_INTERVAL = 5;
+static const unsigned int INVENTORY_BROADCAST_INTERVAL = 1;
 /**
  * Maximum number of inventory items to send per transmission.
  * Limits the impact of low-fee transaction floods.
