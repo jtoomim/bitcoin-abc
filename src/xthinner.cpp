@@ -84,7 +84,6 @@ int XthinnerSegment::FromTXIDs(const std::vector<CTransactionRef> &vtx, const CT
     }
     LogPrintf("Encoding an Xthinner block with %d transactions with mempool size %d\n",
         vtx.size(), pool.mapTx.size());
-    std::cout << "Encoding an Xthinner block with "<< vtx.size() << " transactions with mempool size " << pool.mapTx.size() << "\n";
     it = pool.mapTx.get<txid_score>().begin();
     //it = pool.mapTx.get<txid_score>().find(*pool.mapTx.find(vtx[start]));
 
