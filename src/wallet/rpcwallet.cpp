@@ -486,7 +486,8 @@ static CTransactionRef SendMoney(CWallet *const pwallet,
     CCoinControl coinControl;
     CTransactionRef tx;
     if (!pwallet->CreateTransaction(vecSend, tx, reservekey, nFeeRequired,
-                                    nChangePosRet, strError, coinControl)) {
+                                    nChangePosRet, strError, coinControl,
+                                    true, true)) {
         if (!fSubtractFeeFromAmount &&
             !pwallet->CheckBalance(nValue + nFeeRequired)) {
             strError = strprintf("Error: This transaction requires a "
@@ -515,10 +516,10 @@ static UniValue sendtoaddress(const Config &config,
     }
 
     if (request.fHelp || request.params.size() < 2 ||
-        request.params.size() > 5) {
+        request.params.size() > 6) {
         throw std::runtime_error(
             "sendtoaddress \"address\" amount ( \"comment\" \"comment_to\" "
-            "subtractfeefromamount )\n"
+            "subtractfeefromamount duplications)\n"
             "\nSend an amount to a given address.\n" +
             HelpRequiringPassphrase(pwallet) +
             "\nArguments:\n"
@@ -542,6 +543,12 @@ static UniValue sendtoaddress(const Config &config,
             "fee will be deducted from the amount being sent.\n"
             "                             The recipient will receive less "
             "bitcoins than you enter in the amount field.\n"
+            "6. duplications  (integer, optional, default=1) The number of\n"
+            "transactions that will be generated and sent. Useful for\n"
+            "generating bulk transactions for stress tests. If greater than\n"
+            "1, only the last TXID will be returned. If less than 1, a value\n"
+            "of 1 will be used instead.\n"
+
             "\nResult:\n"
             "\"txid\"                  (string) The transaction id.\n"
             "\nExamples:\n" +
@@ -591,12 +598,18 @@ static UniValue sendtoaddress(const Config &config,
     if (request.params.size() > 4) {
         fSubtractFeeFromAmount = request.params[4].get_bool();
     }
+    uint32_t nDuplications = 1;
+    if (request.params.size() > 5) {
+        nDuplications = request.params[5].get_int();
+        if (nDuplications < 1) nDuplications = 1;
+    }
 
     EnsureWalletIsUnlocked(pwallet);
-
-    CTransactionRef tx =
-        SendMoney(pwallet, dest, nAmount, fSubtractFeeFromAmount,
-                  std::move(mapValue), {} /* fromAccount */);
+    CTransactionRef tx;
+    for (uint32_t i=0; i<nDuplications; i++) {
+        tx = SendMoney(pwallet, dest, nAmount, fSubtractFeeFromAmount,
+                       std::move(mapValue), {} /* fromAccount */);
+    }
     return tx->GetId().GetHex();
 }
 

@@ -2797,6 +2797,76 @@ bool CWallet::SelectCoins(const std::vector<COutput> &vAvailableCoins,
     return res;
 }
 
+bool CWallet::FastSelectCoins(const Amount nTargetValue,
+                              std::set<CInputCoin> &setCoinsRet, Amount &nValueRet,
+                              const CCoinControl *coinControl) const {
+
+    uint32_t nBytes = 200;
+    Amount nEstimatedFees = GetMinimumFee(*this, nBytes, *coinControl, g_mempool);
+
+    auto it = mapWallet.lower_bound(txLastSpent);
+    const TxId endTxId = it->first;
+    bool done = false;
+    while (!done) {
+        it++;
+        if (it == mapWallet.end()) it = mapWallet.begin();
+
+        const TxId &wtxid = it->first;
+        const CWalletTx *pcoin = &it->second;
+
+        if (wtxid == endTxId) done = true; // inish this iteration
+
+        int nDepth = pcoin->GetDepthInMainChain();
+        if ((!CheckFinalTx(*pcoin->tx)) ||
+            (pcoin->IsImmatureCoinBase()) ||
+            (nDepth < 0) ||
+            (nDepth == 0 && pcoin->InMempool())) {
+            continue;
+        }
+
+        bool safeTx = pcoin->IsTrusted();
+        if (nDepth == 0 &&
+            pcoin->mapValue.count("replaced_by_txid")) {
+            safeTx = false;
+        }
+
+        if (!safeTx) {
+            continue;
+        }
+        for (uint32_t i = 0; i < pcoin->tx->vout.size(); i++) {
+            if (IsSpent(wtxid, i)) continue;
+            if (coinControl->HasSelected() &&
+                !coinControl->fAllowOtherInputs &&
+                !coinControl->IsSelected(
+                    COutPoint(it->first, i))) {
+                continue;
+            }
+
+            isminetype mine = IsMine(pcoin->tx->vout[i]);
+            if ((IsLockedCoin(it->first, i)) ||
+                (mine == ISMINE_NO)) {
+                continue;
+            }
+
+            setCoinsRet.insert(CInputCoin(pcoin->tx, i));
+            nBytes += 100;
+            nEstimatedFees = GetMinimumFee(*this, nBytes, *coinControl, g_mempool);
+            nValueRet += pcoin->tx->vout[i].nValue;
+
+            txLastSpent = it->first;
+
+            if (nValueRet >= nTargetValue) {
+                return true;
+            }
+        }
+
+        if (nValueRet >= nTargetValue) {
+            return true;
+        }
+    }
+    return false;
+}
+
 bool CWallet::SignTransaction(CMutableTransaction &tx) {
     // sign the new tx
     CTransaction txNewConst(tx);
@@ -2900,7 +2970,8 @@ bool CWallet::CreateTransaction(const std::vector<CRecipient> &vecSend,
                                 CTransactionRef &tx, CReserveKey &reservekey,
                                 Amount &nFeeRet, int &nChangePosInOut,
                                 std::string &strFailReason,
-                                const CCoinControl &coinControl, bool sign) {
+                                const CCoinControl &coinControl, bool sign,
+                                bool fast) {
     Amount nValue = Amount::zero();
     int nChangePosRequest = nChangePosInOut;
     unsigned int nSubtractFeeFromAmount = 0;
@@ -2962,7 +3033,9 @@ bool CWallet::CreateTransaction(const std::vector<CRecipient> &vecSend,
         LOCK2(cs_main, cs_wallet);
 
         std::vector<COutput> vAvailableCoins;
-        AvailableCoins(vAvailableCoins, true, &coinControl);
+        if (!fast) {
+            AvailableCoins(vAvailableCoins, true, &coinControl);
+        }
         // Parameters for coin selection, init with dummy
         CoinSelectionParams coin_selection_params;
 
@@ -3075,7 +3148,17 @@ bool CWallet::CreateTransaction(const std::vector<CRecipient> &vecSend,
 
             // Choose coins to use
             bool bnb_used;
-            if (pick_new_inputs) {
+            if (fast && pick_new_inputs) {
+                nValueIn = Amount::zero();
+                setCoins.clear();
+                if (!FastSelectCoins(nValueToSelect, setCoins,
+                                     nValueIn, &coinControl)) {
+                    strFailReason = _("Insufficient funds");
+                    return false;
+                }
+            }
+
+            else if (!fast && pick_new_inputs) {
                 nValueIn = Amount::zero();
                 setCoins.clear();
                 coin_selection_params.change_spend_size =

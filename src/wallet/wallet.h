@@ -669,6 +669,19 @@ private:
     std::mutex mutexScanning;
     friend class WalletRescanReserver;
 
+    /**
+     * Select a set of coins such that nValueRet >= nTargetValue and at least
+     * all coins from coinControl are selected; Never select unconfirmed coins
+     * if they are not ours.
+     */
+    bool SelectCoins(const std::vector<COutput> &vAvailableCoins,
+                     const Amount nTargetValue,
+                     std::set<CInputCoin> &setCoinsRet, Amount &nValueRet,
+                     const CCoinControl *coinControl = nullptr) const;
+    bool FastSelectCoins(const Amount nTargetValue,
+                         std::set<CInputCoin> &setCoinsRet, Amount &nValueRet,
+                         const CCoinControl *coinControl = nullptr) const;
+
     CWalletDB *pwalletdbEncryption;
 
     //! the current wallet version: clients below this version are not able to
@@ -831,6 +844,9 @@ public:
 
     std::map<TxId, CWalletTx> mapWallet;
     std::list<CAccountingEntry> laccentries;
+
+    // For fast sendtoaddress, we start checking our UTXOs at or before this.
+    mutable TxId txLastSpent;
 
     typedef std::pair<CWalletTx *, CAccountingEntry *> TxPair;
     typedef std::multimap<int64_t, TxPair> TxItems;
@@ -1050,7 +1066,8 @@ public:
                            CTransactionRef &tx, CReserveKey &reservekey,
                            Amount &nFeeRet, int &nChangePosInOut,
                            std::string &strFailReason,
-                           const CCoinControl &coinControl, bool sign = true);
+                           const CCoinControl &coinControl, bool sign = true,
+                           bool fast = false);
     bool CommitTransaction(
         CTransactionRef tx, mapValue_t mapValue,
         std::vector<std::pair<std::string, std::string>> orderForm,
