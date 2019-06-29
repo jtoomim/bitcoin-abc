@@ -158,11 +158,12 @@ class StressTest(BitcoinTestFramework):
     # Create 10 more anyone-can-spend utxo's for testing.
     def make_utxos(self, target=10000):
         print("Running make_utxos()...")
-        self.nodes[0].generate(101)
         rootamount = 49.0/len(self.nodes)
-        fanout = 250 if target < 250*50 else target // 50
+        fanout = 1000 if target < 1000*50 else target // 50
         num_stages = -(-target // fanout) +1 # rounds up
         print("Fanout=%i, num_stages=%i" % (fanout, num_stages))
+        self.nodes[0].generate(101)
+        self.nodes[0].generate(num_stages * self.num_nodes)
         addresses = [node.getnewaddress() for node in self.nodes]
         node_addresses = [[] for _ in self.nodes]
         self.node_addresses = node_addresses
@@ -175,52 +176,22 @@ class StressTest(BitcoinTestFramework):
                    for i in range(len(self.nodes))]
         for thread in threads: thread.start()
         for thread in threads: thread.join()
-        #for thread in threads: 
         t1 = time.time(); print("Generating addresses took %3.3f sec" % (t1-t0))
-        #payments = {address:rootamount for address in addresses}
-        #for i in range(100): 
-        self.nodes[0].generate(num_stages * self.num_nodes)
-        sync_blocks(self.nodes)
+        sync_blocks(self.nodes, timeout=10)
         for i in range(self.num_nodes-1, 0, -1):
             amount = Decimal(round(rootamount/(fanout+1) * 1e8)) / Decimal(1e8)
             payments = {node_addresses[i][n]:amount for n in range(fanout)}
             t1 = time.time()
             for stage in range(num_stages):
                 self.nodes[0].sendmany('', payments)
-                #self.nodes[0].generate(1)
             t2 = time.time(); print("Filling node wallets took %3.3f sec for stage %i:%i" % (t2-t1, i, stage))
         self.nodes[0].generate(1)
         sync_blocks(self.nodes)
-        # print("len(unspent): ", [len(self.nodes[i].listunspent()) for i in range(len(self.nodes))])
-
-        # for stage in range(num_stages):
-        #     for i in range(len(self.nodes)):
-        #         amount = Decimal(round(rootamount/(fanout*21) * 1e8)) / Decimal(1e8)
-        #         payments = {node_addresses[i][n]:amount for n in range(fanout)}
-        #         try:
-        #             txid = (self.nodes[i].sendmany('', payments, 0))
-        #             tx = self.nodes[i].gettransaction(txid)
-        #             self.nodes[0].sendrawtransaction(tx['hex'])
-        #         except:
-        #             traceback.print_exc()
-        #             #print(payments)
-        #             #unspent = self.nodes[i].listunspent()
-        #             #print(unspent)
-
-        #     t3 = time.time(); print("Making UTXOs took %3.3f sec" % (t3-t2))
-        #     start = time.time()
-        #     while (time.time() - start < 20) and self.nodes[0].getmempoolinfo()['size'] < self.num_nodes:
-        #         time.sleep(0.01)
-        #     assert self.nodes[0].getmempoolinfo()['size'] >= self.num_nodes
-        #     # print("Waiting for txs took %3.3f sec" % (time.time() - start))
         for i in range(1+(target*self.num_nodes)//20000):
             self.nodes[0].generate(1)
             sync_blocks(self.nodes, timeout=20)
-            #print(self.nodes[0].getblock(self.nodes[0].getbestblockhash(), 1))
             blk = self.nodes[0].getblock(self.nodes[0].getbestblockhash(), 1)
             print("Block has %i transactions and is %i bytes" % (len(blk['tx']), blk['size']))
-        # print([node.getbalance() for node in self.nodes])
-        # print("len(unspent): ", [len(self.nodes[i].listunspent()) for i in range(len(self.nodes))])
         return amount
 
     def check_mempools(self):
@@ -236,6 +207,7 @@ class StressTest(BitcoinTestFramework):
                     time.sleep(0.001)
         print("Mempool sizes:\t", ("%7i "*len(self.nodes)) % tuple([r['size'] for r in results]), '\t',
               "Mempool bytes:\t", ("%9i "*len(self.nodes)) % tuple([r['bytes'] for r in results]))
+        return [r['size'] for r in results]
 
 
     def mempool_watcher(self, interval):
@@ -252,8 +224,8 @@ class StressTest(BitcoinTestFramework):
                 now = time.time()
                 if i/(now-t) > rate:
                     time.sleep(i/rate - (now-t))
-                if not (i%500):
-                    print("Node %2i\ttx %5i\tat %3.3f sec\t(%3.0f tx/sec" % (node, i, time.time()-t, (i/(time.time()-t))))
+                if not (i%2000):
+                    print("Node %2i\ttx %5i\tat %3.3f sec\t(%3.0f tx/sec)" % (node, i, time.time()-t, (i/(time.time()-t))))
                 add = addresses[i % len(addresses)]
                 try:
                     self.nodes[node].sendtoaddress(add, value, '', '', False, 100)
@@ -264,19 +236,19 @@ class StressTest(BitcoinTestFramework):
                     traceback.print_exc()
                     break
         threads = [threading.Thread(target=helper,
-                                    args=(n, txcount, 700))
+                                    args=(n, txcount, 1500))
                    for n in range(1, len(self.nodes))]
 
         t0 = time.time()
         for thread in threads: thread.start()
         for thread in threads: thread.join()
         t1 = time.time(); print("Generating spam took %3.3f sec" % (t1-t0))
-        print("Sleeping for %i seconds to allow catchup" % self.num_nodes*1)
-        for i in range(self.num_nodes*1):
-            self.check_mempools()
+        results = self.check_mempools()
+        while [r for r in results if abs(r - results[0]) > 10]:
             time.sleep(1)
-        # time.sleep(10)
-        # print("Sleep complete")
+            results = self.check_mempools()
+        t2 = time.time(); print("Mempool sync took %3.3f sec" % (t2-t1))
+
         for i in range(2):
             self.check_mempools()
             t2a = time.time()
@@ -310,13 +282,13 @@ class StressTest(BitcoinTestFramework):
         print(self.nodes[0].getmempoolinfo())
 
         # We will need UTXOs to construct transactions in later tests.
-        utxo_value = self.make_utxos(10000)
-        spend_value = Decimal((utxo_value * 100000000 - 192)//10) / Decimal(1e8)
-        print(utxo_value, spend_value)
-
+        utxo_value = self.make_utxos(56000)
+        spend_value = utxo_value #Decimal((utxo_value * 100000000 - 192)//10) / Decimal(1e8)
+            
         for i in range(5):
+            spend_value = Decimal((spend_value * 100000000 - 192)) / Decimal(1e8)
             print("Spam block generation round %i" % i)
-            self.generate_spam(spend_value, txcount=10000)
+            self.generate_spam(spend_value, txcount=56000)
 
 
         self.watching = False
