@@ -341,6 +341,11 @@ def initialize_datadir(dirname, n):
 def get_datadir_path(dirname, n):
     return os.path.join(dirname, "node" + str(n))
 
+def initialize_walletdir(dirname, n):
+    walletdir = get_datadir_path(dirname, n)
+    if not os.path.isdir(walletdir):
+        os.makedirs(walletdir)
+    return walletdir
 
 def append_config(datadir, options):
     with open(os.path.join(datadir, "bitcoin.conf"), 'a', encoding='utf8') as f:
