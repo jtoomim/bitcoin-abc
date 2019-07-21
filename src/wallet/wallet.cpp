@@ -2801,10 +2801,11 @@ bool CWallet::FastSelectCoins(const Amount nTargetValue,
                               std::set<CInputCoin> &setCoinsRet, Amount &nValueRet,
                               const CCoinControl *coinControl) const {
 
-    uint32_t nBytes = 200;
+    uint32_t nBytes = 100;
     Amount nEstimatedFees = GetMinimumFee(*this, nBytes, *coinControl, g_mempool);
 
     auto it = mapWallet.lower_bound(txLastSpent);
+    if (it != mapWallet.begin()) it--;
     const TxId endTxId = it->first;
     bool done = false;
     while (!done) {
@@ -3224,6 +3225,9 @@ bool CWallet::CreateTransaction(const std::vector<CRecipient> &vecSend,
 
             Amount nFeeNeeded =
                 GetMinimumFee(*this, nBytes, coinControl, g_mempool);
+
+            LogPrintf("nFeeNeeded = %d, nChange = %d, nValueToSelect = %d\n",
+                nFeeNeeded, nChange, nValueToSelect);
 
             // If we made it here and we aren't even able to meet the relay fee
             // on the next pass, give up because we must be at the maximum

@@ -1211,9 +1211,10 @@ static UniValue sendmany(const Config &config, const JSONRPCRequest &request) {
             HelpRequiringPassphrase(pwallet) +
             "\n"
             "\nArguments:\n"
-            "1. \"fromaccount\"         (string, required) DEPRECATED. The "
-            "account to send the funds from. Should be \"\" for the default "
-            "account\n"
+            "1. \"fromaccount\"         (string, required) IGNORED. Account "
+            "support has been removed from sendmany. This argument is still "
+            "required, but its value will be ignored. Suggested: \"\" for the "
+            "default account\n"
             "2. \"amounts\"             (string, required) A json object with "
             "addresses and amounts\n"
             "    {\n"
@@ -1223,8 +1224,8 @@ static UniValue sendmany(const Config &config, const JSONRPCRequest &request) {
             " is the value\n"
             "      ,...\n"
             "    }\n"
-            "3. minconf                 (numeric, optional, default=1) Only "
-            "use the balance confirmed at least this many times.\n"
+            "3. minconf                 (numeric, optional, default=1) IGNORED. "
+            "Only use the balance confirmed at least this many times.\n"
             "4. \"comment\"             (string, optional) A comment\n"
             "5. subtractfeefrom         (array, optional) A json array with "
             "addresses.\n"
@@ -1286,12 +1287,7 @@ static UniValue sendmany(const Config &config, const JSONRPCRequest &request) {
             "Error: Peer-to-peer functionality missing or disabled");
     }
 
-    std::string strAccount = LabelFromValue(request.params[0]);
     UniValue sendTo = request.params[1].get_obj();
-    int nMinDepth = 1;
-    if (!request.params[2].isNull()) {
-        nMinDepth = request.params[2].get_int();
-    }
 
     mapValue_t mapValue;
     if (request.params.size() > 3 && !request.params[3].isNull() &&
@@ -1346,11 +1342,9 @@ static UniValue sendmany(const Config &config, const JSONRPCRequest &request) {
     EnsureWalletIsUnlocked(pwallet);
 
     // Check funds
-    Amount nBalance =
-        pwallet->GetLegacyBalance(ISMINE_SPENDABLE, nMinDepth, &strAccount);
-    if (totalAmount > nBalance) {
+    if (!pwallet->CheckBalance(totalAmount)) {
         throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS,
-                           "Account has insufficient funds");
+                           "Wallet has insufficient funds");
     }
 
     // Send
@@ -1362,13 +1356,14 @@ static UniValue sendmany(const Config &config, const JSONRPCRequest &request) {
     CCoinControl coinControl;
     bool fCreated =
         pwallet->CreateTransaction(vecSend, tx, keyChange, nFeeRequired,
-                                   nChangePosRet, strFailReason, coinControl);
+                                   nChangePosRet, strFailReason, coinControl,
+                                   true, true);
     if (!fCreated) {
         throw JSONRPCError(RPC_WALLET_INSUFFICIENT_FUNDS, strFailReason);
     }
     CValidationState state;
     if (!pwallet->CommitTransaction(tx, std::move(mapValue), {} /* orderForm */,
-                                    std::move(strAccount), keyChange,
+                                    {}, keyChange,
                                     g_connman.get(), state)) {
         strFailReason = strprintf("Transaction commit failed:: %s",
                                   state.GetRejectReason());
