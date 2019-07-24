@@ -2471,9 +2471,9 @@ static bool ProcessMessage(const Config &config, CNode *pfrom,
         assert(ret);
 
         if (strCommand == NetMsgType::GETBLOCKTXN) {
-            SendBlockTransactions(*recent_block, req, pfrom, connman);
+            SendBlockTransactions(block, req, pfrom, connman);
         } else {
-            SendXthinnerTransactions(*recent_block, req, pfrom, connman);
+            SendXthinnerTransactions(block, req, pfrom, connman);
         }
     }
 
