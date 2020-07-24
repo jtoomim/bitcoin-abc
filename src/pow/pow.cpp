@@ -13,6 +13,7 @@
 #include <consensus/params.h>
 #include <pow/daa.h>
 #include <pow/eda.h>
+#include <pow/aserti3.h>
 #include <primitives/blockhash.h>
 #include <util/system.h>
 
@@ -27,6 +28,12 @@ uint32_t GetNextWorkRequired(const CBlockIndex *pindexPrev,
     // Special rule for regtest: we never retarget.
     if (params.fPowNoRetargeting) {
         return pindexPrev->nBits;
+    }
+
+    if (IsAxionEnabled(params, pindexPrev)) {
+        const CBlockIndex *preferenceblock = GetASERTReferenceBlock(pindexPrev, params);
+
+        return GetNextASERTWorkRequired(pindexPrev, pblock, params, preferenceblock);
     }
 
     if (IsDAAEnabled(params, pindexPrev)) {

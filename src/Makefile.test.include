@@ -119,6 +119,7 @@ BITCOIN_TESTS =\
   avalanche/test/proof_tests.cpp \
   pow/test/daa_tests.cpp \
   pow/test/eda_tests.cpp \
+  pow/test/aserti3_tests.cpp \
   test/scriptnum10.h \
   test/activation_tests.cpp \
   test/addrman_tests.cpp \

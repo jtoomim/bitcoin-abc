@@ -97,6 +97,11 @@ public:
         consensus.fPowAllowMinDifficultyBlocks = false;
         consensus.fPowNoRetargeting = false;
 
+        // The half life for the ASERT DAA. For every (nDAAHalfLife) seconds behind schedule the blockchain gets,
+        // difficulty is cut in half. Doubled if blocks are ahead of schedule.
+        // Two days
+        consensus.nDAAHalfLife = 2 * 24 * 60 * 60;
+
         // nPowTargetTimespan / nPowTargetSpacing
         consensus.nMinerConfirmationWindow = 2016;
         consensus.vDeployments[Consensus::DEPLOYMENT_TESTDUMMY] = {
@@ -332,6 +337,11 @@ public:
         consensus.fPowAllowMinDifficultyBlocks = true;
         consensus.fPowNoRetargeting = false;
 
+        // The half life for the ASERT DAA. For every (nDAAHalfLife) seconds behind schedule the blockchain gets,
+        // difficulty is cut in half. Doubled if blocks are ahead of schedule.
+        // One hour
+        consensus.nDAAHalfLife = 60 * 60;
+
         // nPowTargetTimespan / nPowTargetSpacing
         consensus.nMinerConfirmationWindow = 2016;
         consensus.vDeployments[Consensus::DEPLOYMENT_TESTDUMMY] = {
@@ -521,6 +531,11 @@ public:
         consensus.nPowTargetSpacing = 10 * 60;
         consensus.fPowAllowMinDifficultyBlocks = true;
         consensus.fPowNoRetargeting = true;
+
+        // The half life for the ASERT DAA. For every (nDAAHalfLife) seconds behind schedule the blockchain gets,
+        // difficulty is cut in half. Doubled if blocks are ahead of schedule.
+        // Two days
+        consensus.nDAAHalfLife = 2 * 24 * 60 * 60;
 
         // Faster than normal for regtest (144 instead of 2016)
         consensus.nMinerConfirmationWindow = 144;

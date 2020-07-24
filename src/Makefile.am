@@ -201,6 +201,7 @@ BITCOIN_CORE_H = \
   policy/settings.h \
   pow/daa.h \
   pow/eda.h \
+  pow/aserti3.h \
   pow/pow.h \
   protocol.h \
   psbt.h \
@@ -338,6 +339,7 @@ libbitcoin_server_a_SOURCES = \
   policy/settings.cpp \
   pow/daa.cpp \
   pow/eda.cpp \
+  pow/aserti3.cpp \
   pow/pow.cpp \
   rest.cpp \
   rpc/abc.cpp \

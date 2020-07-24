@@ -534,6 +534,7 @@ add_library(server
 	policy/settings.cpp
 	pow/daa.cpp
 	pow/eda.cpp
+	pow/aserti3.cpp
 	pow/pow.cpp
 	rest.cpp
 	rpc/abc.cpp
